@@ -253,6 +253,8 @@ function EserciziPage() {
       .then(setEsercizioInvoices).catch(() => setEsercizioInvoices([])).finally(() => setInvoicesLoading(false));
   }, [selectedEsercizio]);
 
+  useEffect(() => { setPage(0); }, [search, statusFilter]);
+
   if (loading) return <Spinner />;
   const filtered = (data || []).filter((e) => {
     if (statusFilter !== "all" && e.status !== statusFilter) return false;
@@ -261,7 +263,6 @@ function EserciziPage() {
   });
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageData = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  useEffect(() => { setPage(0); }, [search, statusFilter]);
   const statusCounts = {};
   (data || []).forEach((e) => { statusCounts[e.status] = (statusCounts[e.status] || 0) + 1; });
 
@@ -360,6 +361,8 @@ function ClientiPage() {
       .then(setCustomerSubs).catch(() => setCustomerSubs([])).finally(() => setSubsLoading(false));
   }, [selectedCustomer]);
 
+  useEffect(() => { setPage(0); }, [search]);
+
   if (loading) return <Spinner />;
   const filtered = (data || []).filter((c) => {
     if (!search) return true;
@@ -368,7 +371,6 @@ function ClientiPage() {
   });
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageData = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  useEffect(() => { setPage(0); }, [search]);
 
   const csvColumns = [
     { label: "Customer ID", accessor: r => r.stripe_customer_id }, { label: "Ragione Sociale", accessor: r => r.ragione_sociale },
@@ -445,6 +447,7 @@ function SubscriptionsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("active");
   const [page, setPage] = useState(0);
+  useEffect(() => { setPage(0); }, [search, statusFilter]);
   if (loading) return <Spinner />;
   const filtered = (data || []).filter((s) => {
     if (statusFilter !== "all" && s.status !== statusFilter) return false;
@@ -453,7 +456,6 @@ function SubscriptionsPage() {
   });
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageData = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  useEffect(() => { setPage(0); }, [search, statusFilter]);
   const statusCounts = {};
   (data || []).forEach((s) => { statusCounts[s.status] = (statusCounts[s.status] || 0) + 1; });
 
@@ -510,6 +512,7 @@ function InvoicesPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(0);
+  useEffect(() => { setPage(0); }, [search, statusFilter]);
   if (loading) return <Spinner />;
   const filtered = (data || []).filter((inv) => {
     if (statusFilter !== "all" && inv.status !== statusFilter) return false;
@@ -518,7 +521,6 @@ function InvoicesPage() {
   });
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageData = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  useEffect(() => { setPage(0); }, [search, statusFilter]);
   const statusCounts = {};
   (data || []).forEach((inv) => { statusCounts[inv.status] = (statusCounts[inv.status] || 0) + 1; });
 
