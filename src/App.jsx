@@ -949,22 +949,26 @@ function InvoicesPage() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SUBSCRIPTION CREATION PAGE
+// SUBSCRIPTION CREATION PAGE — Redesigned
 // ═══════════════════════════════════════════════════════════════
 function CreateSubscriptionPage() {
   const { data: customers } = useData("customers", "select=stripe_customer_id,ragione_sociale,email&deleted=is.false&order=ragione_sociale.asc");
   const { data: productsRaw } = useData("v_products_with_prices", "order=product_name.asc");
-  const { data: allEsercizi } = useData("esercizi", "select=esercizio_id,nome_esercizio,customer_id,citta,status&order=nome_esercizio.asc");
+  const { data: allEsercizi, reload: reloadEsercizi } = useData("esercizi", "select=esercizio_id,nome_esercizio,customer_id,citta,provincia,status,stripe_subscription_id&order=nome_esercizio.asc");
 
-  const [step, setStep] = useState(1); // 1=customer, 2=items, 3=review
+  const [step, setStep] = useState(1);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [customerSearch, setCustomerSearch] = useState("");
-  const [items, setItems] = useState([]);
+  // Each item = { esercizio_id, product_id, price_id, quantity, pricing_mode, override_amount, coupon_id }
+  const [selectedEsercizi, setSelectedEsercizi] = useState([]); // [{esercizio_id, nome_esercizio, ...config}]
   const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, billing_interval: "year", start_date: "", tax_rate_id: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
+  const [showQuickCreate, setShowQuickCreate] = useState(false);
+  const [bulkConfig, setBulkConfig] = useState({ product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: "" });
+  const [esSearch, setEsSearch] = useState("");
 
-  // Filter products to only recurring
+  // Group products (only recurring)
   const products = useMemo(() => {
     if (!productsRaw) return [];
     const grouped = {};
@@ -976,42 +980,116 @@ function CreateSubscriptionPage() {
     return Object.values(grouped);
   }, [productsRaw]);
 
-  // Esercizi for selected customer
-  const customerEsercizi = useMemo(() => {
+  // Available esercizi: belong to customer AND have NO subscription
+  const availableEsercizi = useMemo(() => {
     if (!selectedCustomer || !allEsercizi) return [];
-    return allEsercizi.filter(e => e.customer_id === selectedCustomer.stripe_customer_id);
+    return allEsercizi.filter(e =>
+      e.customer_id === selectedCustomer.stripe_customer_id &&
+      !e.stripe_subscription_id
+    );
   }, [selectedCustomer, allEsercizi]);
 
-  const filteredCustomers = customerSearch ? (customers || []).filter(c => (c.ragione_sociale || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.stripe_customer_id || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.email || "").toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 15) : [];
+  // Filter available esercizi by search
+  const filteredAvailable = useMemo(() => {
+    if (!esSearch) return availableEsercizi;
+    const q = esSearch.toLowerCase();
+    return availableEsercizi.filter(e =>
+      (e.nome_esercizio || "").toLowerCase().includes(q) ||
+      (e.esercizio_id || "").toLowerCase().includes(q) ||
+      (e.citta || "").toLowerCase().includes(q)
+    );
+  }, [availableEsercizi, esSearch]);
 
-  const addItem = () => {
-    setItems(prev => [...prev, { id: Date.now(), esercizio_id: "", product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "" }]);
-  };
+  // Already-on-sub count for info
+  const alreadyLinkedCount = useMemo(() => {
+    if (!selectedCustomer || !allEsercizi) return 0;
+    return allEsercizi.filter(e => e.customer_id === selectedCustomer.stripe_customer_id && e.stripe_subscription_id).length;
+  }, [selectedCustomer, allEsercizi]);
 
-  const updateItem = (id, key, value) => {
-    setItems(prev => prev.map(it => it.id === id ? { ...it, [key]: value } : it));
-  };
-
-  const removeItem = (id) => setItems(prev => prev.filter(it => it.id !== id));
+  const filteredCustomers = customerSearch ? (customers || []).filter(c =>
+    (c.ragione_sociale || "").toLowerCase().includes(customerSearch.toLowerCase()) ||
+    (c.stripe_customer_id || "").toLowerCase().includes(customerSearch.toLowerCase()) ||
+    (c.email || "").toLowerCase().includes(customerSearch.toLowerCase())
+  ).slice(0, 15) : [];
 
   const getPrice = (priceId) => productsRaw?.find(p => p.stripe_price_id === priceId);
 
-  const totalAmount = items.reduce((sum, it) => {
+  // Toggle select esercizio
+  const toggleEsercizio = (es) => {
+    setSelectedEsercizi(prev => {
+      const exists = prev.find(x => x.esercizio_id === es.esercizio_id);
+      if (exists) return prev.filter(x => x.esercizio_id !== es.esercizio_id);
+      return [...prev, {
+        esercizio_id: es.esercizio_id,
+        nome_esercizio: es.nome_esercizio,
+        citta: es.citta,
+        product_id: "", price_id: "", quantity: 1,
+        pricing_mode: "standard", override_amount: "", coupon_id: ""
+      }];
+    });
+  };
+
+  const selectAll = () => {
+    const allIds = new Set(selectedEsercizi.map(x => x.esercizio_id));
+    const newOnes = filteredAvailable.filter(e => !allIds.has(e.esercizio_id)).map(e => ({
+      esercizio_id: e.esercizio_id, nome_esercizio: e.nome_esercizio, citta: e.citta,
+      product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: ""
+    }));
+    setSelectedEsercizi(prev => [...prev, ...newOnes]);
+  };
+
+  const deselectAll = () => setSelectedEsercizi([]);
+
+  const updateEsConfig = (esId, key, value) => {
+    setSelectedEsercizi(prev => prev.map(x => x.esercizio_id === esId ? { ...x, [key]: value } : x));
+  };
+
+  // BULK APPLY: copy bulkConfig to all selected esercizi
+  const applyBulk = () => {
+    setSelectedEsercizi(prev => prev.map(x => ({
+      ...x,
+      product_id: bulkConfig.product_id || x.product_id,
+      price_id: bulkConfig.price_id || x.price_id,
+      quantity: bulkConfig.quantity || x.quantity,
+      pricing_mode: bulkConfig.pricing_mode || x.pricing_mode,
+      override_amount: bulkConfig.pricing_mode === "override" ? bulkConfig.override_amount : x.override_amount,
+      coupon_id: bulkConfig.coupon_id || x.coupon_id,
+    })));
+    setStatusMsg({ type: "success", text: `Configurazione applicata a ${selectedEsercizi.length} esercizi` });
+  };
+
+  // Calculate unit amount for an item
+  const getUnitAmount = (it) => {
+    if (it.pricing_mode === "override" && it.override_amount) return parseFloat(it.override_amount) * 100;
     const price = getPrice(it.price_id);
-    if (!price) return sum;
-    const unitAmount = it.pricing_mode === "override" && it.override_amount ? parseFloat(it.override_amount) * 100 : price.unit_amount;
-    return sum + unitAmount * it.quantity;
-  }, 0);
+    return price?.unit_amount || 0;
+  };
 
+  const totalAmount = selectedEsercizi.reduce((sum, it) => sum + getUnitAmount(it) * (it.quantity || 1), 0);
+
+  // AGGREGATION: group by price_id + pricing_mode + unit_amount for Stripe
+  const aggregatedItems = useMemo(() => {
+    const agg = {};
+    selectedEsercizi.forEach(it => {
+      if (!it.product_id || !it.price_id) return;
+      const unitAmt = getUnitAmount(it);
+      const key = `${it.price_id}|${it.pricing_mode}|${unitAmt}|${it.coupon_id || ""}`;
+      if (!agg[key]) agg[key] = { price_id: it.price_id, product_id: it.product_id, pricing_mode: it.pricing_mode, unit_amount: unitAmt, coupon_id: it.coupon_id, quantity: 0, esercizi: [] };
+      agg[key].quantity += (it.quantity || 1);
+      agg[key].esercizi.push(it.esercizio_id);
+    });
+    return Object.values(agg);
+  }, [selectedEsercizi]);
+
+  // Validation
+  const incompleteItems = selectedEsercizi.filter(it => !it.product_id || !it.price_id);
+  const isValid = selectedEsercizi.length > 0 && incompleteItems.length === 0;
+
+  // SAVE DRAFT
   const handleSaveDraft = async () => {
-    if (!selectedCustomer) return;
-    if (items.length === 0) { setStatusMsg({ type: "error", text: "Aggiungi almeno un item" }); return; }
-    const invalidItems = items.filter(it => !it.product_id || !it.price_id);
-    if (invalidItems.length > 0) { setStatusMsg({ type: "error", text: "Completa tutti gli items: prodotto e prezzo obbligatori" }); return; }
-
+    if (!isValid || !selectedCustomer) return;
     setSaving(true); setStatusMsg(null);
     try {
-      // Create draft
       const [draft] = await sbPost("subscription_drafts", {
         stripe_customer_id: selectedCustomer.stripe_customer_id,
         status: "draft",
@@ -1022,52 +1100,81 @@ function CreateSubscriptionPage() {
         tax_rate_id: draftSettings.tax_rate_id || null,
         notes: draftSettings.notes || null,
       });
-      // Create draft items
-      for (const it of items) {
-        const price = getPrice(it.price_id);
-        const unitAmount = it.pricing_mode === "override" && it.override_amount ? Math.round(parseFloat(it.override_amount) * 100) : price?.unit_amount;
+      for (const it of selectedEsercizi) {
+        const unitAmt = getUnitAmount(it);
         await sbPost("subscription_draft_items", {
-          draft_id: draft.id,
-          esercizio_id: it.esercizio_id || null,
-          product_id: it.product_id,
-          price_id: it.price_id,
-          quantity: it.quantity,
-          unit_amount: unitAmount,
-          total_amount: unitAmount * it.quantity,
-          pricing_mode: it.pricing_mode,
+          draft_id: draft.id, esercizio_id: it.esercizio_id, product_id: it.product_id,
+          price_id: it.price_id, quantity: it.quantity || 1, unit_amount: unitAmt,
+          total_amount: unitAmt * (it.quantity || 1), pricing_mode: it.pricing_mode,
           override_amount: it.pricing_mode === "override" && it.override_amount ? Math.round(parseFloat(it.override_amount) * 100) : null,
         });
       }
-      setStatusMsg({ type: "success", text: `Draft #${draft.id} creato. Vai alla pagina Drafts per approvarlo.` });
-      // Reset
-      setItems([]); setStep(1); setSelectedCustomer(null);
+      setStatusMsg({ type: "success", text: `Draft #${draft.id} creato — vai a Drafts per approvarlo` });
+      setSelectedEsercizi([]); setStep(1); setSelectedCustomer(null);
     } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
     finally { setSaving(false); }
   };
 
+  // QUICK CREATE ESERCIZIO (inline)
+  const QuickCreateInline = () => {
+    const [qf, setQf] = useState({ esercizio_id: "", nome_esercizio: "", citta: "", provincia: "" });
+    const [qSaving, setQSaving] = useState(false);
+    const [qErr, setQErr] = useState(null);
+    const handleQ = async () => {
+      if (!qf.esercizio_id || !qf.nome_esercizio) { setQErr("ID e Nome obbligatori"); return; }
+      setQSaving(true); setQErr(null);
+      try {
+        await sbPost("esercizi", { ...qf, customer_id: selectedCustomer.stripe_customer_id, status: "bozza_solo_cliente" });
+        reloadEsercizi();
+        setShowQuickCreate(false);
+        setStatusMsg({ type: "success", text: `Esercizio ${qf.esercizio_id} creato e disponibile` });
+      } catch (err) { setQErr(err.message); }
+      finally { setQSaving(false); }
+    };
+    return (<div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+      <h4 className="text-xs font-bold text-blue-800 mb-3 flex items-center gap-1.5"><Plus size={14} /> Creazione Rapida Esercizio</h4>
+      {qErr && <p className="text-xs text-red-600 mb-2">{qErr}</p>}
+      <div className="grid grid-cols-4 gap-2">
+        <input type="text" value={qf.esercizio_id} onChange={e => setQf(p => ({ ...p, esercizio_id: e.target.value }))} className={inputCls + " text-xs"} placeholder="ID Esercizio *" />
+        <input type="text" value={qf.nome_esercizio} onChange={e => setQf(p => ({ ...p, nome_esercizio: e.target.value }))} className={inputCls + " text-xs"} placeholder="Nome *" />
+        <input type="text" value={qf.citta} onChange={e => setQf(p => ({ ...p, citta: e.target.value }))} className={inputCls + " text-xs"} placeholder="Città" />
+        <div className="flex gap-1">
+          <input type="text" value={qf.provincia} onChange={e => setQf(p => ({ ...p, provincia: e.target.value }))} className={inputCls + " text-xs w-16"} placeholder="PR" maxLength={2} />
+          <button onClick={handleQ} disabled={qSaving} className="px-3 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">{qSaving ? "..." : "Crea"}</button>
+          <button onClick={() => setShowQuickCreate(false)} className="px-2 py-2 text-gray-400 hover:text-gray-600"><X size={14} /></button>
+        </div>
+      </div>
+    </div>);
+  };
+
   return (<div className="space-y-5">
-    <div><h1 className="text-2xl font-bold text-gray-900">Crea Subscription</h1><p className="text-sm text-gray-500 mt-0.5">Prepara una draft da approvare</p></div>
+    <div><h1 className="text-2xl font-bold text-gray-900">Crea Subscription</h1><p className="text-sm text-gray-500 mt-0.5">Seleziona esercizi, configura prodotti, salva o invia a Stripe</p></div>
     <StatusMessage msg={statusMsg} onClear={() => setStatusMsg(null)} />
 
     {/* STEP INDICATOR */}
     <div className="flex items-center gap-3">
-      {[{ n: 1, label: "Cliente" }, { n: 2, label: "Prodotti & Esercizi" }, { n: 3, label: "Riepilogo" }].map(({ n, label }) => (
-        <button key={n} onClick={() => { if (n <= step || (n === 2 && selectedCustomer) || (n === 3 && items.length > 0)) setStep(n); }} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${step === n ? "bg-indigo-600 text-white" : step > n ? "bg-indigo-100 text-indigo-700" : "bg-gray-100 text-gray-400"}`}>
+      {[{ n: 1, label: "Cliente" }, { n: 2, label: "Esercizi" }, { n: 3, label: "Configura" }, { n: 4, label: "Riepilogo" }].map(({ n, label }) => (
+        <button key={n} onClick={() => {
+          if (n === 1) setStep(1);
+          if (n === 2 && selectedCustomer) setStep(2);
+          if (n === 3 && selectedEsercizi.length > 0) setStep(3);
+          if (n === 4 && isValid) setStep(4);
+        }} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${step === n ? "bg-indigo-600 text-white" : step > n ? "bg-indigo-100 text-indigo-700" : "bg-gray-100 text-gray-400"}`}>
           <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${step === n ? "bg-white text-indigo-600" : step > n ? "bg-indigo-600 text-white" : "bg-gray-200 text-gray-500"}`}>{step > n ? "✓" : n}</span> {label}
         </button>
       ))}
     </div>
 
-    {/* STEP 1: SELECT CUSTOMER */}
+    {/* ─── STEP 1: SELECT CUSTOMER ─── */}
     {step === 1 && (<div className="bg-white border border-gray-100 rounded-2xl p-6">
       <h3 className="text-sm font-bold text-gray-700 mb-4">Seleziona Cliente</h3>
       <SearchBar value={customerSearch} onChange={setCustomerSearch} placeholder="Cerca per ragione sociale, email o customer ID..." />
       {selectedCustomer && (<div className="mt-3 p-4 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-between">
         <div><p className="font-bold text-indigo-900">{selectedCustomer.ragione_sociale}</p><p className="text-xs text-indigo-600 font-mono">{selectedCustomer.stripe_customer_id}</p></div>
-        <div className="flex gap-2"><button onClick={() => setSelectedCustomer(null)} className="text-xs text-red-500 hover:text-red-700">Cambia</button><button onClick={() => setStep(2)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Avanti →</button></div>
+        <div className="flex gap-2"><button onClick={() => { setSelectedCustomer(null); setSelectedEsercizi([]); }} className="text-xs text-red-500 hover:text-red-700">Cambia</button><button onClick={() => setStep(2)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Avanti →</button></div>
       </div>)}
       {!selectedCustomer && customerSearch && (<div className="mt-2 max-h-64 overflow-y-auto border border-gray-200 rounded-xl">
-        {filteredCustomers.map(c => (<button key={c.stripe_customer_id} onClick={() => { setSelectedCustomer(c); setCustomerSearch(""); }} className="w-full text-left px-4 py-3 text-sm hover:bg-indigo-50 border-b border-gray-50 last:border-0">
+        {filteredCustomers.map(c => (<button key={c.stripe_customer_id} onClick={() => { setSelectedCustomer(c); setCustomerSearch(""); setSelectedEsercizi([]); }} className="w-full text-left px-4 py-3 text-sm hover:bg-indigo-50 border-b border-gray-50 last:border-0">
           <p className="font-medium text-gray-900">{c.ragione_sociale || "—"}</p>
           <p className="text-xs text-gray-400">{c.email || ""} — <span className="font-mono">{c.stripe_customer_id}</span></p>
         </button>))}
@@ -1075,108 +1182,228 @@ function CreateSubscriptionPage() {
       </div>)}
     </div>)}
 
-    {/* STEP 2: ADD ITEMS */}
+    {/* ─── STEP 2: SELECT ESERCIZI ─── */}
     {step === 2 && (<div className="space-y-4">
       <div className="bg-white border border-gray-100 rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div><h3 className="text-sm font-bold text-gray-700">Items</h3><p className="text-xs text-gray-400">Per {selectedCustomer?.ragione_sociale} — {customerEsercizi.length} esercizi collegati</p></div>
-          <button onClick={addItem} className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700"><Plus size={14} /> Aggiungi Item</button>
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <h3 className="text-sm font-bold text-gray-700">Esercizi Disponibili</h3>
+            <p className="text-xs text-gray-400 mt-0.5">{availableEsercizi.length} senza subscription — {alreadyLinkedCount} già collegati (nascosti)</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => setShowQuickCreate(!showQuickCreate)} className="flex items-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100"><Plus size={14} /> Crea Esercizio</button>
+            <button onClick={selectAll} className="px-3 py-2 bg-gray-100 text-gray-600 text-xs font-bold rounded-lg hover:bg-gray-200">Seleziona tutti</button>
+            {selectedEsercizi.length > 0 && <button onClick={deselectAll} className="px-3 py-2 text-red-500 text-xs font-bold rounded-lg hover:bg-red-50">Deseleziona</button>}
+          </div>
         </div>
-        {items.length === 0 ? (<EmptyState icon={Package} text="Nessun item. Clicca 'Aggiungi Item' per iniziare." />) : (
-          <div className="space-y-3">{items.map((it, idx) => (
-            <div key={it.id} className="p-4 border border-gray-200 rounded-xl bg-gray-50/50">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-bold text-gray-500">Item #{idx + 1}</span>
-                <button onClick={() => removeItem(it.id)} className="text-red-400 hover:text-red-600"><Trash2 size={14} /></button>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <FormField label="Esercizio">
-                  <select value={it.esercizio_id} onChange={e => updateItem(it.id, "esercizio_id", e.target.value)} className={selectCls + " text-xs"}>
-                    <option value="">— Nessuno —</option>
-                    {customerEsercizi.map(e => <option key={e.esercizio_id} value={e.esercizio_id}>{e.nome_esercizio} ({e.esercizio_id})</option>)}
-                  </select>
-                </FormField>
-                <FormField label="Prodotto *">
-                  <select value={it.product_id} onChange={e => { updateItem(it.id, "product_id", e.target.value); updateItem(it.id, "price_id", ""); }} className={selectCls + " text-xs"}>
-                    <option value="">Seleziona...</option>
-                    {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{shortName(p.product_name)}</option>)}
-                  </select>
-                </FormField>
-                <FormField label="Prezzo *">
-                  <select value={it.price_id} onChange={e => updateItem(it.id, "price_id", e.target.value)} className={selectCls + " text-xs"}>
-                    <option value="">Seleziona...</option>
-                    {it.product_id && products.find(p => p.stripe_product_id === it.product_id)?.prices.map(pr => (
-                      <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.recurring_interval || "one-time"}{pr.price_active ? "" : " (inattivo)"}</option>
-                    ))}
-                  </select>
-                </FormField>
-                <FormField label="Quantità">
-                  <input type="number" min="1" value={it.quantity} onChange={e => updateItem(it.id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-xs"} />
-                </FormField>
-                <FormField label="Pricing">
-                  <select value={it.pricing_mode} onChange={e => updateItem(it.id, "pricing_mode", e.target.value)} className={selectCls + " text-xs"}>
-                    <option value="standard">Prezzo Standard</option>
-                    <option value="override">Override Prezzo</option>
-                  </select>
-                </FormField>
-                {it.pricing_mode === "override" && (
-                  <FormField label="Override (€ per unità)" hint="Prezzo in euro, es: 170.00">
-                    <input type="number" step="0.01" value={it.override_amount} onChange={e => updateItem(it.id, "override_amount", e.target.value)} className={inputCls + " text-xs"} placeholder="es: 170.00" />
-                  </FormField>
-                )}
-                <div className="flex items-end">
-                  <p className="text-xs text-gray-500 pb-2">Subtotale: <span className="font-bold text-gray-900">{(() => {
-                    const price = getPrice(it.price_id);
-                    if (!price) return "—";
-                    const unit = it.pricing_mode === "override" && it.override_amount ? parseFloat(it.override_amount) * 100 : price.unit_amount;
-                    return eur(unit * it.quantity / 100);
-                  })()}</span></p>
-                </div>
-              </div>
-            </div>
-          ))}</div>
+
+        {showQuickCreate && <QuickCreateInline />}
+
+        <div className="mt-3"><SearchBar value={esSearch} onChange={setEsSearch} placeholder="Filtra esercizi per nome, ID, città..." /></div>
+
+        {selectedEsercizi.length > 0 && (
+          <div className="mt-3 p-3 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-between">
+            <span className="text-xs font-bold text-indigo-800">{selectedEsercizi.length} esercizi selezionati</span>
+            <button onClick={() => setStep(3)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Configura Prodotti →</button>
+          </div>
         )}
-      </div>
-      {/* Settings */}
-      <div className="bg-white border border-gray-100 rounded-2xl p-6">
-        <h3 className="text-sm font-bold text-gray-700 mb-4">Impostazioni</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <FormField label="Metodo"><select value={draftSettings.collection_method} onChange={e => setDraftSettings(prev => ({ ...prev, collection_method: e.target.value }))} className={selectCls}><option value="send_invoice">Invia Fattura</option><option value="charge_automatically">Addebito Auto</option></select></FormField>
-          <FormField label="GG Scadenza"><input type="number" min="0" value={draftSettings.days_until_due} onChange={e => setDraftSettings(prev => ({ ...prev, days_until_due: parseInt(e.target.value) || 30 }))} className={inputCls} /></FormField>
-          <FormField label="Billing"><select value={draftSettings.billing_interval} onChange={e => setDraftSettings(prev => ({ ...prev, billing_interval: e.target.value }))} className={selectCls}><option value="year">Annuale</option><option value="month">Mensile</option></select></FormField>
-          <FormField label="Data Inizio"><input type="date" value={draftSettings.start_date} onChange={e => setDraftSettings(prev => ({ ...prev, start_date: e.target.value }))} className={inputCls} /></FormField>
+
+        <div className="mt-3 max-h-96 overflow-y-auto border border-gray-200 rounded-xl">
+          {filteredAvailable.length === 0 ? (
+            <div className="p-6 text-center text-gray-400 text-sm">
+              {availableEsercizi.length === 0
+                ? "Nessun esercizio disponibile per questo cliente. Tutti già in subscription o nessuno collegato."
+                : "Nessun risultato per la ricerca"}
+            </div>
+          ) : filteredAvailable.map(es => {
+            const isSelected = selectedEsercizi.some(x => x.esercizio_id === es.esercizio_id);
+            return (<button key={es.esercizio_id} onClick={() => toggleEsercizio(es)} className={`w-full text-left px-4 py-3 border-b border-gray-50 last:border-0 flex items-center gap-3 transition-all ${isSelected ? "bg-indigo-50" : "hover:bg-gray-50"}`}>
+              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${isSelected ? "bg-indigo-600 border-indigo-600" : "border-gray-300"}`}>
+                {isSelected && <CheckCircle size={12} className="text-white" />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-gray-900 text-sm truncate">{es.nome_esercizio}</p>
+                <p className="text-[10px] text-gray-400"><span className="font-mono">{es.esercizio_id}</span>{es.citta && ` — ${es.citta}`}{es.provincia && ` (${es.provincia})`}</p>
+              </div>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${STATUS_MAP[es.status]?.color || "bg-gray-100 text-gray-600"}`}>{STATUS_MAP[es.status]?.label || es.status}</span>
+            </button>);
+          })}
         </div>
-        <FormField label="Note"><input type="text" value={draftSettings.notes} onChange={e => setDraftSettings(prev => ({ ...prev, notes: e.target.value }))} className={inputCls + " mt-3"} placeholder="Note opzionali..." /></FormField>
       </div>
+
       <div className="flex items-center justify-between">
         <button onClick={() => setStep(1)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Indietro</button>
-        <div className="text-right"><p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {draftSettings.billing_interval}</p>
-          <button onClick={() => setStep(3)} disabled={items.length === 0} className="mt-1 px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30">Riepilogo →</button>
+        {selectedEsercizi.length > 0 && <button onClick={() => setStep(3)} className="px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Configura Prodotti →</button>}
+      </div>
+    </div>)}
+
+    {/* ─── STEP 3: CONFIGURE PRODUCTS PER ESERCIZIO ─── */}
+    {step === 3 && (<div className="space-y-4">
+      {/* BULK CONFIGURATOR */}
+      <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-2xl p-5">
+        <h3 className="text-sm font-bold text-indigo-900 mb-1 flex items-center gap-2"><Copy size={16} /> Configurazione Bulk</h3>
+        <p className="text-xs text-indigo-600 mb-4">Imposta e applica a tutti i {selectedEsercizi.length} esercizi in un click</p>
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+          <FormField label="Prodotto">
+            <select value={bulkConfig.product_id} onChange={e => setBulkConfig(p => ({ ...p, product_id: e.target.value, price_id: "" }))} className={selectCls + " text-xs"}>
+              <option value="">Seleziona...</option>
+              {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{shortName(p.product_name)}</option>)}
+            </select>
+          </FormField>
+          <FormField label="Prezzo">
+            <select value={bulkConfig.price_id} onChange={e => setBulkConfig(p => ({ ...p, price_id: e.target.value }))} className={selectCls + " text-xs"}>
+              <option value="">Seleziona...</option>
+              {bulkConfig.product_id && products.find(p => p.stripe_product_id === bulkConfig.product_id)?.prices.map(pr => (
+                <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.recurring_interval}{pr.price_active ? "" : " ⚠"}</option>
+              ))}
+            </select>
+          </FormField>
+          <FormField label="Qtà">
+            <input type="number" min="1" value={bulkConfig.quantity} onChange={e => setBulkConfig(p => ({ ...p, quantity: parseInt(e.target.value) || 1 }))} className={inputCls + " text-xs"} />
+          </FormField>
+          <FormField label="Pricing">
+            <select value={bulkConfig.pricing_mode} onChange={e => setBulkConfig(p => ({ ...p, pricing_mode: e.target.value }))} className={selectCls + " text-xs"}>
+              <option value="standard">Standard</option>
+              <option value="override">Override</option>
+            </select>
+          </FormField>
+          {bulkConfig.pricing_mode === "override" && (
+            <FormField label="Override €">
+              <input type="number" step="0.01" value={bulkConfig.override_amount} onChange={e => setBulkConfig(p => ({ ...p, override_amount: e.target.value }))} className={inputCls + " text-xs"} placeholder="170.00" />
+            </FormField>
+          )}
+          <FormField label="Coupon ID">
+            <input type="text" value={bulkConfig.coupon_id} onChange={e => setBulkConfig(p => ({ ...p, coupon_id: e.target.value }))} className={inputCls + " text-xs"} placeholder="opzionale" />
+          </FormField>
+        </div>
+        <button onClick={applyBulk} disabled={!bulkConfig.product_id || !bulkConfig.price_id} className="mt-3 px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30 flex items-center gap-1.5"><Copy size={14} /> Applica a tutti ({selectedEsercizi.length})</button>
+      </div>
+
+      {/* PER-ESERCIZIO CONFIG */}
+      <div className="bg-white border border-gray-100 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-bold text-gray-700">{selectedEsercizi.length} Esercizi — Configurazione Singola</h3>
+          <p className="text-xs text-gray-400">Puoi personalizzare ogni esercizio singolarmente</p>
+        </div>
+        <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+          {selectedEsercizi.map((it, idx) => {
+            const isComplete = it.product_id && it.price_id;
+            return (<div key={it.esercizio_id} className={`p-3 border rounded-xl transition-all ${isComplete ? "border-emerald-200 bg-emerald-50/30" : "border-amber-200 bg-amber-50/30"}`}>
+              <div className="flex items-center gap-3 mb-2">
+                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${isComplete ? "bg-emerald-600 text-white" : "bg-amber-400 text-white"}`}>{isComplete ? "✓" : idx + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-medium text-gray-900 text-sm">{it.nome_esercizio}</span>
+                  <span className="text-[10px] text-gray-400 ml-2 font-mono">{it.esercizio_id}</span>
+                  {it.citta && <span className="text-[10px] text-gray-400 ml-1">— {it.citta}</span>}
+                </div>
+                <span className="text-xs font-bold text-gray-700">{isComplete ? eur(getUnitAmount(it) * (it.quantity || 1) / 100) : "—"}</span>
+                <button onClick={() => setSelectedEsercizi(prev => prev.filter(x => x.esercizio_id !== it.esercizio_id))} className="text-red-300 hover:text-red-500 flex-shrink-0"><X size={14} /></button>
+              </div>
+              <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                <select value={it.product_id} onChange={e => { updateEsConfig(it.esercizio_id, "product_id", e.target.value); updateEsConfig(it.esercizio_id, "price_id", ""); }} className={selectCls + " text-[11px] py-1.5"}>
+                  <option value="">Prodotto *</option>
+                  {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{shortName(p.product_name)}</option>)}
+                </select>
+                <select value={it.price_id} onChange={e => updateEsConfig(it.esercizio_id, "price_id", e.target.value)} className={selectCls + " text-[11px] py-1.5"}>
+                  <option value="">Prezzo *</option>
+                  {it.product_id && products.find(p => p.stripe_product_id === it.product_id)?.prices.map(pr => (
+                    <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)}/{pr.recurring_interval}</option>
+                  ))}
+                </select>
+                <input type="number" min="1" value={it.quantity} onChange={e => updateEsConfig(it.esercizio_id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-[11px] py-1.5"} placeholder="Qtà" />
+                <select value={it.pricing_mode} onChange={e => updateEsConfig(it.esercizio_id, "pricing_mode", e.target.value)} className={selectCls + " text-[11px] py-1.5"}>
+                  <option value="standard">Standard</option>
+                  <option value="override">Override</option>
+                </select>
+                {it.pricing_mode === "override" && (
+                  <input type="number" step="0.01" value={it.override_amount} onChange={e => updateEsConfig(it.esercizio_id, "override_amount", e.target.value)} className={inputCls + " text-[11px] py-1.5"} placeholder="€ override" />
+                )}
+                <input type="text" value={it.coupon_id} onChange={e => updateEsConfig(it.esercizio_id, "coupon_id", e.target.value)} className={inputCls + " text-[11px] py-1.5"} placeholder="Coupon" />
+              </div>
+            </div>);
+          })}
+        </div>
+      </div>
+
+      {/* SETTINGS */}
+      <div className="bg-white border border-gray-100 rounded-2xl p-5">
+        <h3 className="text-sm font-bold text-gray-700 mb-4">Impostazioni Subscription</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <FormField label="Metodo"><select value={draftSettings.collection_method} onChange={e => setDraftSettings(p => ({ ...p, collection_method: e.target.value }))} className={selectCls}><option value="send_invoice">Invia Fattura</option><option value="charge_automatically">Addebito Auto</option></select></FormField>
+          <FormField label="GG Scadenza"><input type="number" min="0" value={draftSettings.days_until_due} onChange={e => setDraftSettings(p => ({ ...p, days_until_due: parseInt(e.target.value) || 30 }))} className={inputCls} /></FormField>
+          <FormField label="Billing"><select value={draftSettings.billing_interval} onChange={e => setDraftSettings(p => ({ ...p, billing_interval: e.target.value }))} className={selectCls}><option value="year">Annuale</option><option value="month">Mensile</option></select></FormField>
+          <FormField label="Data Inizio"><input type="date" value={draftSettings.start_date} onChange={e => setDraftSettings(p => ({ ...p, start_date: e.target.value }))} className={inputCls} /></FormField>
+        </div>
+        <FormField label="Note"><input type="text" value={draftSettings.notes} onChange={e => setDraftSettings(p => ({ ...p, notes: e.target.value }))} className={inputCls + " mt-3"} placeholder="Note opzionali..." /></FormField>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Esercizi</button>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {draftSettings.billing_interval}</p>
+          {incompleteItems.length > 0 && <p className="text-[10px] text-amber-600 mt-0.5">{incompleteItems.length} esercizi incompleti</p>}
+          <button onClick={() => setStep(4)} disabled={!isValid} className="mt-1 px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30">Riepilogo →</button>
         </div>
       </div>
     </div>)}
 
-    {/* STEP 3: REVIEW & SAVE */}
-    {step === 3 && (<div className="space-y-4">
+    {/* ─── STEP 4: REVIEW & AGGREGATION ─── */}
+    {step === 4 && (<div className="space-y-4">
       <div className="bg-white border border-gray-100 rounded-2xl p-6">
-        <h3 className="text-sm font-bold text-gray-700 mb-4">Riepilogo Draft</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 pb-4 border-b border-gray-100">
-          <div><span className="text-gray-500 block text-xs">Cliente</span><span className="font-bold">{selectedCustomer?.ragione_sociale}</span></div>
-          <div><span className="text-gray-500 block text-xs">Items</span><span className="font-bold">{items.length}</span></div>
+        <h3 className="text-sm font-bold text-gray-700 mb-4">Riepilogo Subscription</h3>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-5 pb-4 border-b border-gray-100">
+          <div><span className="text-gray-500 block text-xs">Cliente</span><span className="font-bold text-sm">{selectedCustomer?.ragione_sociale}</span></div>
+          <div><span className="text-gray-500 block text-xs">Esercizi</span><span className="font-bold">{selectedEsercizi.length}</span></div>
+          <div><span className="text-gray-500 block text-xs">Aggregated Items</span><span className="font-bold">{aggregatedItems.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Billing</span><span className="font-bold">{draftSettings.billing_interval}</span></div>
-          <div><span className="text-gray-500 block text-xs">Totale</span><span className="font-bold text-lg">{eur(totalAmount / 100)}</span></div>
+          <div><span className="text-gray-500 block text-xs">Totale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span></div>
         </div>
-        <table className="w-full text-xs"><thead><tr className="border-b border-gray-200 bg-gray-50"><th className="text-left py-2 px-3">Esercizio</th><th className="text-left py-2 px-3">Prodotto</th><th className="text-right py-2 px-3">Prezzo Unit</th><th className="text-right py-2 px-3">Qtà</th><th className="text-right py-2 px-3">Subtot</th><th className="text-left py-2 px-3">Pricing</th></tr></thead>
-        <tbody>{items.map((it, i) => {
-          const price = getPrice(it.price_id);
-          const unitAmt = it.pricing_mode === "override" && it.override_amount ? parseFloat(it.override_amount) * 100 : price?.unit_amount || 0;
-          const esercizio = allEsercizi?.find(e => e.esercizio_id === it.esercizio_id);
-          return (<tr key={i} className="border-b border-gray-50"><td className="py-2 px-3">{esercizio?.nome_esercizio || it.esercizio_id || "—"}</td><td className="py-2 px-3">{shortName(products.find(p => p.stripe_product_id === it.product_id)?.product_name)}</td><td className="py-2 px-3 text-right">{eur(unitAmt / 100)}</td><td className="py-2 px-3 text-right">{it.quantity}</td><td className="py-2 px-3 text-right font-bold">{eur(unitAmt * it.quantity / 100)}</td><td className="py-2 px-3">{it.pricing_mode === "override" ? <Badge color="amber">Override</Badge> : <Badge color="green">Standard</Badge>}</td></tr>);
-        })}</tbody></table>
+
+        {/* AGGREGATION TABLE */}
+        <h4 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5"><Package size={14} /> Subscription Items (aggregati per Stripe)</h4>
+        <p className="text-[10px] text-gray-400 mb-3">Esercizi con stesso prodotto/prezzo/pricing vengono raggruppati in un unico item Stripe</p>
+        <table className="w-full text-xs mb-5"><thead><tr className="border-b border-gray-200 bg-gray-50">
+          <th className="text-left py-2 px-3">Prodotto</th><th className="text-left py-2 px-3">Price ID</th>
+          <th className="text-right py-2 px-3">Unit €</th><th className="text-right py-2 px-3">Qtà Aggregata</th>
+          <th className="text-right py-2 px-3">Subtotale</th><th className="text-left py-2 px-3">Pricing</th>
+          <th className="text-left py-2 px-3">Esercizi</th>
+        </tr></thead><tbody>{aggregatedItems.map((agg, i) => (
+          <tr key={i} className="border-b border-gray-50">
+            <td className="py-2 px-3 font-medium">{shortName(products.find(p => p.stripe_product_id === agg.product_id)?.product_name)}</td>
+            <td className="py-2 px-3 font-mono text-[10px] text-gray-400">{agg.price_id?.slice(-12)}</td>
+            <td className="py-2 px-3 text-right">{eur(agg.unit_amount / 100)}</td>
+            <td className="py-2 px-3 text-right font-bold">{agg.quantity}</td>
+            <td className="py-2 px-3 text-right font-bold text-indigo-700">{eur(agg.unit_amount * agg.quantity / 100)}</td>
+            <td className="py-2 px-3">{agg.pricing_mode === "override" ? <Badge color="amber">Override</Badge> : <Badge color="green">Standard</Badge>}{agg.coupon_id && <Badge color="purple">Coupon</Badge>}</td>
+            <td className="py-2 px-3 text-[10px] text-gray-500">{agg.esercizi.length} esercizi</td>
+          </tr>
+        ))}</tbody></table>
+
+        {/* DETAIL: per-esercizio */}
+        <details className="group">
+          <summary className="text-xs font-bold text-gray-500 cursor-pointer hover:text-gray-700 mb-2">Dettaglio per esercizio ({selectedEsercizi.length})</summary>
+          <table className="w-full text-[11px]"><thead><tr className="border-b border-gray-200 bg-gray-50/50">
+            <th className="text-left py-1.5 px-2">Esercizio</th><th className="text-left py-1.5 px-2">Prodotto</th>
+            <th className="text-right py-1.5 px-2">€/unità</th><th className="text-right py-1.5 px-2">Qtà</th>
+            <th className="text-right py-1.5 px-2">Subtot</th><th className="text-left py-1.5 px-2">Coupon</th>
+          </tr></thead><tbody>{selectedEsercizi.map((it, i) => (
+            <tr key={i} className="border-b border-gray-50">
+              <td className="py-1.5 px-2">{it.nome_esercizio} <span className="text-gray-400 font-mono">({it.esercizio_id})</span></td>
+              <td className="py-1.5 px-2">{shortName(products.find(p => p.stripe_product_id === it.product_id)?.product_name)}</td>
+              <td className="py-1.5 px-2 text-right">{eur(getUnitAmount(it) / 100)}</td>
+              <td className="py-1.5 px-2 text-right">{it.quantity}</td>
+              <td className="py-1.5 px-2 text-right font-bold">{eur(getUnitAmount(it) * (it.quantity || 1) / 100)}</td>
+              <td className="py-1.5 px-2 text-gray-400">{it.coupon_id || "—"}</td>
+            </tr>
+          ))}</tbody></table>
+        </details>
       </div>
+
       <div className="flex items-center justify-between">
-        <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Modifica</button>
-        <button onClick={handleSaveDraft} disabled={saving} className="px-8 py-3 bg-emerald-600 text-white text-sm font-bold rounded-xl hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 shadow-lg">{saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salva come Draft</button>
+        <button onClick={() => setStep(3)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Modifica</button>
+        <div className="flex gap-3">
+          <button onClick={handleSaveDraft} disabled={saving} className="px-6 py-3 bg-amber-500 text-white text-sm font-bold rounded-xl hover:bg-amber-600 disabled:opacity-50 flex items-center gap-2">{saving ? <Loader2 size={16} className="animate-spin" /> : <FileCheck size={16} />} Salva come Draft</button>
+        </div>
       </div>
     </div>)}
   </div>);
