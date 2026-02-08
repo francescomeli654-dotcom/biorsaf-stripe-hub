@@ -1270,7 +1270,7 @@ function CreateSubscriptionPage() {
   const [selectedEsercizi, setSelectedEsercizi] = useState([]); // [{esercizio_id, nome_esercizio, citta, provincia}]
   // Product lines = separate array, each esercizio can have N lines
   const [productLines, setProductLines] = useState([]); // [{id, esercizio_id, product_id, price_id, quantity, pricing_mode, override_amount, coupon_id}]
-  const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, billing_interval: "year", start_date: "", tax_rate_id: "", notes: "" });
+  const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, start_date: "", tax_rate_id: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
   const [showQuickCreate, setShowQuickCreate] = useState(false);
@@ -1315,6 +1315,20 @@ function CreateSubscriptionPage() {
 
   const getPrice = (priceId) => productsRaw?.find(p => p.stripe_price_id === priceId);
   const getProduct = (productId) => products.find(p => p.stripe_product_id === productId);
+
+  // Auto-detect billing interval from selected prices (all items must have same interval in classic billing)
+  const detectedInterval = useMemo(() => {
+    const intervals = new Set();
+    productLines.forEach(l => {
+      if (l.price_id) {
+        const pr = getPrice(l.price_id);
+        if (pr?.billing_interval) intervals.add(pr.billing_interval);
+      }
+    });
+    if (intervals.size === 1) return [...intervals][0];
+    if (intervals.size > 1) return "mixed"; // errore: non si possono mischiare
+    return "year"; // default
+  }, [productLines, productsRaw]);
 
   // Format price display clearly
   const fmtPrice = (pr) => {
@@ -1402,7 +1416,7 @@ function CreateSubscriptionPage() {
   const eserciziWithLines = new Set(productLines.filter(l => l.product_id && l.price_id).map(l => l.esercizio_id));
   const eserciziWithoutLines = selectedEsercizi.filter(es => !eserciziWithLines.has(es.esercizio_id));
   const incompleteLines = productLines.filter(l => !l.product_id || !l.price_id);
-  const isValid = selectedEsercizi.length > 0 && eserciziWithoutLines.length === 0 && incompleteLines.length === 0 && productLines.length > 0;
+  const isValid = selectedEsercizi.length > 0 && eserciziWithoutLines.length === 0 && incompleteLines.length === 0 && productLines.length > 0 && detectedInterval !== "mixed";
 
   // ─── STRIPE INVOICE PREVIEW ────────────────────────────
   const fetchStripePreview = async () => {
@@ -1412,12 +1426,14 @@ function CreateSubscriptionPage() {
       const payload = {
         action: "preview_invoice",
         customer_id: selectedCustomer.stripe_customer_id,
-        collection_method: draftSettings.collection_method,
-        items: aggregatedItems.map(agg => ({
-          product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
-          pricing_mode: agg.pricing_mode, billing_interval: draftSettings.billing_interval,
-          override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
-        })),
+        items: aggregatedItems.map(agg => {
+          const pr = getPrice(agg.price_id);
+          return {
+            product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
+            pricing_mode: agg.pricing_mode, billing_interval: pr?.billing_interval || "year",
+            override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
+          };
+        }),
       };
       const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -1440,7 +1456,7 @@ function CreateSubscriptionPage() {
       const [draft] = await sbPost("subscription_drafts", {
         stripe_customer_id: selectedCustomer.stripe_customer_id, status: "draft",
         collection_method: draftSettings.collection_method, days_until_due: draftSettings.days_until_due,
-        billing_interval: draftSettings.billing_interval, start_date: draftSettings.start_date || null,
+        billing_interval: detectedInterval, start_date: draftSettings.start_date || null,
         tax_rate_id: draftSettings.tax_rate_id || null, notes: draftSettings.notes || null,
       });
       for (const line of productLines) {
@@ -1467,13 +1483,15 @@ function CreateSubscriptionPage() {
     customer_id: selectedCustomer.stripe_customer_id,
     collection_method: draftSettings.collection_method,
     days_until_due: draftSettings.days_until_due,
-    billing_interval: draftSettings.billing_interval,
     start_date: draftSettings.start_date || undefined,
-    items: aggregatedItems.map(agg => ({
-      product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
-      pricing_mode: agg.pricing_mode, billing_interval: draftSettings.billing_interval,
-      override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
-    })),
+    items: aggregatedItems.map(agg => {
+      const pr = getPrice(agg.price_id);
+      return {
+        product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
+        pricing_mode: agg.pricing_mode, billing_interval: pr?.billing_interval || "year",
+        override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
+      };
+    }),
     esercizio_detail: productLines.filter(l => l.product_id && l.price_id).map(l => ({
       esercizio_id: l.esercizio_id, product_id: l.product_id, price_id: l.price_id,
       quantity: l.quantity || 1, pricing_mode: l.pricing_mode,
@@ -1808,7 +1826,7 @@ function CreateSubscriptionPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <FormField label="Metodo"><select value={draftSettings.collection_method} onChange={e => setDraftSettings(p => ({ ...p, collection_method: e.target.value }))} className={selectCls}><option value="send_invoice">Invia Fattura</option><option value="charge_automatically">Addebito Auto</option></select></FormField>
           <FormField label="GG Scadenza"><input type="number" min="0" value={draftSettings.days_until_due} onChange={e => setDraftSettings(p => ({ ...p, days_until_due: parseInt(e.target.value) || 30 }))} className={inputCls} /></FormField>
-          <FormField label="Billing"><select value={draftSettings.billing_interval} onChange={e => setDraftSettings(p => ({ ...p, billing_interval: e.target.value }))} className={selectCls}><option value="year">Annuale</option><option value="month">Mensile</option></select></FormField>
+          <FormField label="Billing" hint="auto da prezzi"><div className={`px-3 py-2 rounded-lg text-sm font-bold ${detectedInterval === "mixed" ? "bg-red-50 text-red-700 border border-red-200" : "bg-emerald-50 text-emerald-800 border border-emerald-200"}`}>{detectedInterval === "year" ? "Annuale" : detectedInterval === "month" ? "Mensile" : detectedInterval === "mixed" ? "⚠ Intervalli misti!" : detectedInterval}</div></FormField>
           <FormField label="Data Inizio"><input type="date" value={draftSettings.start_date} onChange={e => setDraftSettings(p => ({ ...p, start_date: e.target.value }))} className={inputCls} /></FormField>
         </div>
         <FormField label="Note"><input type="text" value={draftSettings.notes} onChange={e => setDraftSettings(p => ({ ...p, notes: e.target.value }))} className={inputCls + " mt-3"} placeholder="Note opzionali..." /></FormField>
@@ -1817,9 +1835,10 @@ function CreateSubscriptionPage() {
       <div className="flex items-center justify-between">
         <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Esercizi</button>
         <div className="text-right">
-          <p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {draftSettings.billing_interval}</p>
+          <p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {detectedInterval === "year" ? "anno" : "mese"}</p>
           {eserciziWithoutLines.length > 0 && <p className="text-[10px] text-amber-600 mt-0.5">{eserciziWithoutLines.length} esercizi senza prodotti</p>}
           {incompleteLines.length > 0 && <p className="text-[10px] text-amber-600">{incompleteLines.length} righe incomplete</p>}
+          {detectedInterval === "mixed" && <p className="text-[10px] text-red-600 font-bold">⚠ Non puoi mescolare prezzi mensili e annuali nella stessa subscription</p>}
           <button onClick={() => setStep(4)} disabled={!isValid} className="mt-1 px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30">Riepilogo →</button>
         </div>
       </div>
@@ -1834,7 +1853,7 @@ function CreateSubscriptionPage() {
           <div><span className="text-gray-500 block text-xs">Esercizi</span><span className="font-bold">{selectedEsercizi.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Righe prodotto</span><span className="font-bold">{productLines.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Items Stripe (aggregati)</span><span className="font-bold">{aggregatedItems.length}</span></div>
-          <div><span className="text-gray-500 block text-xs">Totale locale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {draftSettings.billing_interval === "year" ? "anno" : "mese"}</span></div>
+          <div><span className="text-gray-500 block text-xs">Totale locale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {detectedInterval === "year" ? "anno" : "mese"}</span></div>
         </div>
 
         {/* STRIPE INVOICE PREVIEW */}
@@ -1946,7 +1965,7 @@ function CreateSubscriptionPage() {
       <div className="space-y-4">
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
           <p className="text-sm font-medium text-amber-900 flex items-center gap-2"><AlertTriangle size={16} /> Stai per creare una subscription reale in Stripe</p>
-          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Totale: <strong>{eur(totalAmount / 100)}</strong> / {draftSettings.billing_interval === "year" ? "anno" : "mese"}.</p>
+          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Totale: <strong>{eur(totalAmount / 100)}</strong> / {detectedInterval === "year" ? "anno" : "mese"}.</p>
         </div>
         <div className="flex justify-end gap-3">
           <button onClick={() => setShowStripeConfirm(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
