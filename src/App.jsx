@@ -1426,6 +1426,7 @@ function CreateSubscriptionPage() {
       const payload = {
         action: "preview_invoice",
         customer_id: selectedCustomer.stripe_customer_id,
+        start_date: draftSettings.start_date || undefined,
         items: aggregatedItems.map(agg => {
           const pr = getPrice(agg.price_id);
           return {
@@ -1835,7 +1836,7 @@ function CreateSubscriptionPage() {
       <div className="flex items-center justify-between">
         <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Esercizi</button>
         <div className="text-right">
-          <p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {detectedInterval === "year" ? "anno" : "mese"}</p>
+          <p className="text-xs text-gray-500">Imponibile: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {detectedInterval === "year" ? "anno" : "mese"} <span className="text-[10px] text-gray-400">(+ IVA)</span></p>
           {eserciziWithoutLines.length > 0 && <p className="text-[10px] text-amber-600 mt-0.5">{eserciziWithoutLines.length} esercizi senza prodotti</p>}
           {incompleteLines.length > 0 && <p className="text-[10px] text-amber-600">{incompleteLines.length} righe incomplete</p>}
           {detectedInterval === "mixed" && <p className="text-[10px] text-red-600 font-bold">⚠ Non puoi mescolare prezzi mensili e annuali nella stessa subscription</p>}
@@ -1853,7 +1854,7 @@ function CreateSubscriptionPage() {
           <div><span className="text-gray-500 block text-xs">Esercizi</span><span className="font-bold">{selectedEsercizi.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Righe prodotto</span><span className="font-bold">{productLines.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Items Stripe (aggregati)</span><span className="font-bold">{aggregatedItems.length}</span></div>
-          <div><span className="text-gray-500 block text-xs">Totale locale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {detectedInterval === "year" ? "anno" : "mese"}</span></div>
+          <div><span className="text-gray-500 block text-xs">Imponibile (pre-IVA)</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {detectedInterval === "year" ? "anno" : "mese"}</span></div>
         </div>
 
         {/* STRIPE INVOICE PREVIEW */}
@@ -1864,19 +1865,20 @@ function CreateSubscriptionPage() {
               {previewLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {previewLoading ? "Caricamento..." : stripePreview ? "Aggiorna Preview" : "Carica Preview da Stripe"}
             </button>
           </div>
-          {!stripePreview && !previewLoading && <p className="text-[11px] text-indigo-600/70">Clicca il pulsante per generare un'anteprima reale della fattura da Stripe, con importi definitivi, tasse e data primo pagamento.</p>}
+          {!stripePreview && !previewLoading && <p className="text-[11px] text-indigo-600/70">Clicca il pulsante per generare un'anteprima reale della fattura da Stripe, con importi definitivi, IVA e data primo pagamento.</p>}
           {stripePreview && (<div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
               <div className="bg-white rounded-lg p-3 border border-indigo-100">
-                <span className="text-[10px] text-gray-500 block">Subtotale</span>
+                <span className="text-[10px] text-gray-500 block">Imponibile</span>
                 <span className="font-bold text-sm">{eur((stripePreview.subtotal || 0) / 100)}</span>
               </div>
               <div className="bg-white rounded-lg p-3 border border-indigo-100">
-                <span className="text-[10px] text-gray-500 block">Tasse</span>
-                <span className="font-bold text-sm">{eur((stripePreview.tax || 0) / 100)}</span>
+                <span className="text-[10px] text-gray-500 block">IVA {stripePreview.total_tax_amounts?.[0]?.tax_rate?.percentage ? `(${stripePreview.total_tax_amounts[0].tax_rate.percentage}%)` : stripePreview.tax > 0 ? `(${Math.round(stripePreview.tax / stripePreview.subtotal * 100)}%)` : ""}</span>
+                <span className={`font-bold text-sm ${stripePreview.tax > 0 ? "text-orange-700" : "text-red-600"}`}>{stripePreview.tax > 0 ? eur(stripePreview.tax / 100) : "⚠ € 0,00"}</span>
+                {stripePreview.tax === 0 && <span className="text-[9px] text-red-500 block">Tax non calcolata</span>}
               </div>
               <div className="bg-white rounded-lg p-3 border border-emerald-200">
-                <span className="text-[10px] text-gray-500 block">Totale</span>
+                <span className="text-[10px] text-gray-500 block">Totale IVA incl.</span>
                 <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.total || 0) / 100)}</span>
               </div>
               <div className="bg-white rounded-lg p-3 border border-emerald-200">
@@ -1884,8 +1886,12 @@ function CreateSubscriptionPage() {
                 <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.amount_due || 0) / 100)}</span>
               </div>
               <div className="bg-white rounded-lg p-3 border border-amber-200">
-                <span className="text-[10px] text-gray-500 block">Prima fattura</span>
-                <span className="font-bold text-sm text-amber-700">{stripePreview.next_payment_attempt ? new Date(stripePreview.next_payment_attempt * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "Immediato"}</span>
+                <span className="text-[10px] text-gray-500 block">Inizio periodo</span>
+                <span className="font-bold text-sm text-amber-700">{stripePreview.period_start ? new Date(stripePreview.period_start * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"}</span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-amber-200">
+                <span className="text-[10px] text-gray-500 block">Fine periodo</span>
+                <span className="font-bold text-sm text-amber-700">{stripePreview.period_end ? new Date(stripePreview.period_end * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"}</span>
               </div>
             </div>
             {/* Stripe line items */}
@@ -1895,17 +1901,21 @@ function CreateSubscriptionPage() {
                 <th className="text-left py-1.5 px-2">Descrizione</th>
                 <th className="text-right py-1.5 px-2">Qtà</th>
                 <th className="text-right py-1.5 px-2">Importo</th>
+                <th className="text-right py-1.5 px-2">IVA riga</th>
                 <th className="text-left py-1.5 px-2">Periodo</th>
               </tr></thead><tbody>{stripePreview.lines.map((line, i) => (
                 <tr key={i} className="border-b border-indigo-50">
                   <td className="py-1.5 px-2">{line.description || "—"}</td>
                   <td className="py-1.5 px-2 text-right">{line.quantity || 1}</td>
                   <td className="py-1.5 px-2 text-right font-bold">{eur((line.amount || 0) / 100)}</td>
+                  <td className="py-1.5 px-2 text-right text-orange-700">{line.tax_amounts?.[0]?.amount ? eur(line.tax_amounts[0].amount / 100) : "—"}</td>
                   <td className="py-1.5 px-2 text-[10px] text-gray-400">{line.period_start ? new Date(line.period_start * 1000).toLocaleDateString("it-IT") : ""}{line.period_end ? ` → ${new Date(line.period_end * 1000).toLocaleDateString("it-IT")}` : ""}</td>
                 </tr>
               ))}</tbody></table>
             </div>)}
-            {(stripePreview.total || 0) !== totalAmount && (<p className="text-[10px] text-amber-700 mt-2 flex items-center gap-1"><AlertTriangle size={10} /> Il totale Stripe ({eur((stripePreview.total || 0) / 100)}) differisce dal calcolo locale ({eur(totalAmount / 100)}). Stripe applica arrotondamenti e tasse.</p>)}
+            {/* Tax status */}
+            {stripePreview.tax > 0 && (<p className="text-[10px] text-emerald-600 mt-2">✓ IVA 22% applicata (tax rate manuale)</p>)}
+            {stripePreview.tax === 0 && (<p className="text-[10px] text-red-600 mt-2 font-bold">⚠ IVA non calcolata — verificare tax rate sulla subscription</p>)}
           </div>)}
         </div>
 
@@ -1965,7 +1975,7 @@ function CreateSubscriptionPage() {
       <div className="space-y-4">
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
           <p className="text-sm font-medium text-amber-900 flex items-center gap-2"><AlertTriangle size={16} /> Stai per creare una subscription reale in Stripe</p>
-          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Totale: <strong>{eur(totalAmount / 100)}</strong> / {detectedInterval === "year" ? "anno" : "mese"}.</p>
+          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Imponibile: <strong>{eur(totalAmount / 100)}</strong> / {detectedInterval === "year" ? "anno" : "mese"}.{stripePreview?.tax > 0 && ` IVA: ${eur(stripePreview.tax / 100)} — Totale: ${eur(stripePreview.total / 100)}`}</p>
         </div>
         <div className="flex justify-end gap-3">
           <button onClick={() => setShowStripeConfirm(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
