@@ -72,6 +72,18 @@ const SUB_STATUS_MAP = {
   incomplete: { label: "Incomplete", color: "bg-amber-100 text-amber-800" },
   unpaid: { label: "Unpaid", color: "bg-red-200 text-red-900" },
 };
+const CUSTOMER_TAG_MAP = {
+  cliente_reale: { label: "Reale", color: "bg-emerald-100 text-emerald-800", icon: "✓" },
+  cliente_pilota: { label: "Pilota", color: "bg-blue-100 text-blue-800", icon: "🧪" },
+  cliente_test: { label: "Test Cliente", color: "bg-amber-100 text-amber-800", icon: "⚠" },
+  cliente_test_interno: { label: "Test Interno", color: "bg-purple-100 text-purple-800", icon: "🔧" },
+};
+const ESERCIZIO_TAG_MAP = {
+  esercizio_reale: { label: "Reale", color: "bg-emerald-100 text-emerald-800", icon: "✓" },
+  esercizio_pilota: { label: "Pilota", color: "bg-blue-100 text-blue-800", icon: "🧪" },
+  esercizio_test: { label: "Test Cliente", color: "bg-amber-100 text-amber-800", icon: "⚠" },
+  esercizio_test_interno: { label: "Test Interno", color: "bg-purple-100 text-purple-800", icon: "🔧" },
+};
 
 // ─── CSV EXPORT ─────────────────────────────────────────────
 function exportCSV(rows, columns, filename) {
@@ -446,6 +458,7 @@ function EserciziPage() {
   });
 
   const filterConfig = [
+    { key: "tag", label: "Tag", type: "multi-select", options: Object.entries(ESERCIZIO_TAG_MAP).map(([v, t]) => ({ value: v, label: t.label })) },
     { key: "status", label: "Status", type: "multi-select", options: Object.entries(statusCounts).map(([v, c]) => ({ value: v, label: STATUS_MAP[v]?.label || v, count: c })).sort((a, b) => b.count - a.count) },
     { key: "consulente", label: "Consulente", type: "select", options: Object.entries(consulenteCounts).map(([v, c]) => ({ value: v, label: `${v} (${c})` })).sort((a, b) => b.label - a.label) },
     { key: "gruppo", label: "Gruppo", type: "select", options: Object.entries(gruppoCounts).map(([v, c]) => ({ value: v, label: `${v} (${c})` })).sort((a, b) => b.label - a.label) },
@@ -461,6 +474,7 @@ function EserciziPage() {
       if (!(e.nome_esercizio || "").toLowerCase().includes(s) && !(e.citta || "").toLowerCase().includes(s) && !(e.esercizio_id || "").toLowerCase().includes(s) && !(e.customer_id || "").toLowerCase().includes(s) && !(e.stripe_subscription_id || "").toLowerCase().includes(s) && !(e.customer_name || "").toLowerCase().includes(s)) return false;
     }
     if (filters.status?.length > 0 && !filters.status.includes(e.status)) return false;
+    if (filters.tag?.length > 0 && !filters.tag.includes(e.tag)) return false;
     if (filters.consulente && e.consulente !== filters.consulente) return false;
     if (filters.gruppo && e.gruppo !== filters.gruppo) return false;
     if (filters.sub_linked?.length > 0) {
@@ -485,6 +499,7 @@ function EserciziPage() {
     { label: "Cliente", accessor: r => r.customer_name }, { label: "Customer ID", accessor: r => r.customer_id },
     { label: "Subscription ID", accessor: r => r.stripe_subscription_id }, { label: "Sub Status", accessor: r => r.sub_status },
     { label: "Gruppo", accessor: r => r.gruppo }, { label: "Consulente", accessor: r => r.consulente },
+    { label: "Tag", accessor: r => ESERCIZIO_TAG_MAP[r.tag]?.label || r.tag },
     { label: "Email", accessor: r => r.email }, { label: "Telefono", accessor: r => r.telefono },
   ];
 
@@ -508,6 +523,7 @@ function EserciziPage() {
     <div className="bg-white border border-gray-100 rounded-2xl overflow-hidden">
       <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b border-gray-100 bg-gray-50/50">
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Esercizio</th>
+        <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Tag</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Status</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Città</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Cliente</th>
@@ -516,6 +532,7 @@ function EserciziPage() {
       </tr></thead><tbody>{pageData.map((e, i) => (
         <tr key={i} className="border-b border-gray-50 hover:bg-indigo-50/30 cursor-pointer" onClick={() => setSelectedEsercizio(e)}>
           <td className="py-3 px-4"><p className="font-medium text-gray-900">{e.nome_esercizio}</p><p className="text-[10px] text-gray-400 font-mono">{e.esercizio_id}</p></td>
+          <td className="py-3 px-4">{ESERCIZIO_TAG_MAP[e.tag] && <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${ESERCIZIO_TAG_MAP[e.tag].color}`}>{ESERCIZIO_TAG_MAP[e.tag].label}</span>}</td>
           <td className="py-3 px-4"><span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${STATUS_MAP[e.status]?.color || "bg-gray-100 text-gray-600"}`}>{STATUS_MAP[e.status]?.label || e.status || "—"}</span></td>
           <td className="py-3 px-4 text-gray-600">{e.citta || "—"}</td>
           <td className="py-3 px-4 text-xs text-gray-500">{e.customer_name || <span className="text-gray-300">—</span>}</td>
@@ -529,6 +546,7 @@ function EserciziPage() {
     {selectedEsercizio && (<Modal open={true} onClose={() => { setSelectedEsercizio(null); setEsercizioInvoices(undefined); }} title={`${selectedEsercizio.nome_esercizio} — ${selectedEsercizio.esercizio_id}`} wide>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
         <div><span className="text-gray-500 block text-xs mb-0.5">Status</span><span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${STATUS_MAP[selectedEsercizio.status]?.color || ""}`}>{STATUS_MAP[selectedEsercizio.status]?.label || selectedEsercizio.status}</span></div>
+        <div><span className="text-gray-500 block text-xs mb-0.5">Tag</span>{ESERCIZIO_TAG_MAP[selectedEsercizio.tag] ? <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${ESERCIZIO_TAG_MAP[selectedEsercizio.tag].color}`}>{ESERCIZIO_TAG_MAP[selectedEsercizio.tag].label}</span> : <span className="text-sm text-gray-400">—</span>}</div>
         <div><span className="text-gray-500 block text-xs mb-0.5">Cliente</span><span className="text-sm font-medium">{selectedEsercizio.customer_name || "—"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">Subscription</span><span className="font-mono text-xs">{selectedEsercizio.stripe_subscription_id || "Nessuna"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">Città</span><span className="text-sm">{selectedEsercizio.citta || "—"} {selectedEsercizio.provincia ? `(${selectedEsercizio.provincia})` : ""}</span></div>
@@ -553,7 +571,7 @@ function EserciziPage() {
 
 // ─── CREATE ESERCIZIO MODAL ─────────────────────────────────
 function CreateEsercizioModal({ open, onClose, customers, onSuccess }) {
-  const [form, setForm] = useState({ esercizio_id: "", nome_esercizio: "", customer_id: "", tipologia: "", citta: "", provincia: "", cap: "", indirizzo: "", telefono: "", email: "", consulente: "", gruppo: "", status: "bozza_nuovo" });
+  const [form, setForm] = useState({ esercizio_id: "", nome_esercizio: "", customer_id: "", tipologia: "", citta: "", provincia: "", cap: "", indirizzo: "", telefono: "", email: "", consulente: "", gruppo: "", status: "bozza_nuovo", tag: "esercizio_reale" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [customerSearch, setCustomerSearch] = useState("");
@@ -569,7 +587,7 @@ function CreateEsercizioModal({ open, onClose, customers, onSuccess }) {
       Object.keys(payload).forEach(k => { if (payload[k] === "") delete payload[k]; });
       await sbPost("esercizi", payload);
       onSuccess({ type: "success", text: `Esercizio ${form.esercizio_id} creato` });
-      setForm({ esercizio_id: "", nome_esercizio: "", customer_id: "", tipologia: "", citta: "", provincia: "", cap: "", indirizzo: "", telefono: "", email: "", consulente: "", gruppo: "", status: "bozza_nuovo" });
+      setForm({ esercizio_id: "", nome_esercizio: "", customer_id: "", tipologia: "", citta: "", provincia: "", cap: "", indirizzo: "", telefono: "", email: "", consulente: "", gruppo: "", status: "bozza_nuovo", tag: "esercizio_reale" });
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   };
@@ -595,6 +613,9 @@ function CreateEsercizioModal({ open, onClose, customers, onSuccess }) {
       </FormField>
       <FormField label="Status"><select value={form.status} onChange={e => set("status", e.target.value)} className={selectCls}>
         {Object.entries(STATUS_MAP).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+      </select></FormField>
+      <FormField label="Tag"><select value={form.tag} onChange={e => set("tag", e.target.value)} className={selectCls}>
+        {Object.entries(ESERCIZIO_TAG_MAP).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
       </select></FormField>
       <FormField label="Tipologia"><input type="text" value={form.tipologia} onChange={e => set("tipologia", e.target.value)} className={inputCls} /></FormField>
       <FormField label="Città"><input type="text" value={form.citta} onChange={e => set("citta", e.target.value)} className={inputCls} /></FormField>
@@ -638,6 +659,7 @@ function ClientiPage() {
   if (loading) return <Spinner />;
 
   const filterConfig = [
+    { key: "tag", label: "Tag", type: "multi-select", options: Object.entries(CUSTOMER_TAG_MAP).map(([v, t]) => ({ value: v, label: t.label })) },
     { key: "has_subs", label: "Subscriptions", type: "multi-select", options: [{ value: "active", label: "Con sub attive" }, { value: "none", label: "Senza sub" }, { value: "past_due", label: "Con past due" }] },
     { key: "ragione_sociale", label: "Ragione Sociale", type: "text-contains", placeholder: "contiene..." },
     { key: "email", label: "Email", type: "text-contains", placeholder: "contiene..." },
@@ -646,6 +668,7 @@ function ClientiPage() {
 
   const filtered = (data || []).filter((c) => {
     if (search) { const q = search.toLowerCase(); if (!(c.ragione_sociale || "").toLowerCase().includes(q) && !(c.email || "").toLowerCase().includes(q) && !(c.stripe_customer_id || "").toLowerCase().includes(q) && !(c.partita_iva || "").toLowerCase().includes(q)) return false; }
+    if (filters.tag?.length > 0 && !filters.tag.includes(c.tag)) return false;
     if (filters.has_subs?.length > 0) {
       if (filters.has_subs.includes("active") && !filters.has_subs.includes("none") && c.active_subs_count === 0) return false;
       if (filters.has_subs.includes("none") && !filters.has_subs.includes("active") && c.active_subs_count > 0) return false;
@@ -667,6 +690,7 @@ function ClientiPage() {
     { label: "Città", accessor: r => r.indirizzo_citta }, { label: "Provincia", accessor: r => r.indirizzo_provincia },
     { label: "Sub Attive", accessor: r => r.active_subs_count }, { label: "Sub Totali", accessor: r => r.total_subs_count },
     { label: "MRR €", accessor: r => r.mrr_calculated }, { label: "ARR €", accessor: r => r.arr_calculated },
+    { label: "Tag", accessor: r => CUSTOMER_TAG_MAP[r.tag]?.label || r.tag },
   ];
 
   return (<div className="space-y-5">
@@ -681,6 +705,7 @@ function ClientiPage() {
     <div className="bg-white border border-gray-100 rounded-2xl overflow-hidden">
       <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b border-gray-100 bg-gray-50/50">
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Cliente</th>
+        <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Tag</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Email</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">P.IVA</th>
         <th className="text-center py-3 px-4 text-xs font-semibold text-gray-500">Subs</th>
@@ -689,6 +714,7 @@ function ClientiPage() {
       </tr></thead><tbody>{pageData.map((c, i) => (
         <tr key={i} className={`border-b border-gray-50 hover:bg-indigo-50/30 ${c.has_overdue ? "bg-red-50/30" : ""}`}>
           <td className="py-3 px-4 cursor-pointer" onClick={() => setSelectedCustomer(c)}><p className="font-medium text-gray-900 hover:text-indigo-600">{c.ragione_sociale || "—"}</p><p className="text-[10px] text-gray-400 font-mono">{c.stripe_customer_id}</p></td>
+          <td className="py-3 px-4">{CUSTOMER_TAG_MAP[c.tag] && <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${CUSTOMER_TAG_MAP[c.tag].color}`}>{CUSTOMER_TAG_MAP[c.tag].label}</span>}</td>
           <td className="py-3 px-4 text-gray-500 text-xs">{c.email || "—"}</td>
           <td className="py-3 px-4 text-gray-500 text-xs font-mono">{c.partita_iva || "—"}</td>
           <td className="py-3 px-4 text-center"><span className="text-xs font-bold">{c.active_subs_count || 0}</span>{c.has_overdue && <AlertTriangle size={12} className="text-red-500 inline ml-1" />}</td>
@@ -705,6 +731,7 @@ function ClientiPage() {
         <div><span className="text-gray-500 block text-xs mb-0.5">Email</span><span className="text-sm">{selectedCustomer.email || "—"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">P.IVA</span><span className="text-sm font-mono">{selectedCustomer.partita_iva || "—"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">MRR</span><span className="font-bold text-emerald-700">{selectedCustomer.mrr_calculated > 0 ? eur(selectedCustomer.mrr_calculated) : "—"}</span></div>
+        <div><span className="text-gray-500 block text-xs mb-0.5">Tag</span>{CUSTOMER_TAG_MAP[selectedCustomer.tag] ? <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${CUSTOMER_TAG_MAP[selectedCustomer.tag].color}`}>{CUSTOMER_TAG_MAP[selectedCustomer.tag].label}</span> : <span className="text-sm text-gray-400">—</span>}</div>
         <div><span className="text-gray-500 block text-xs mb-0.5">Telefono</span><span className="text-sm">{selectedCustomer.phone || "—"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">SDI</span><span className="text-sm font-mono">{selectedCustomer.codice_sdi || "—"}</span></div>
         <div><span className="text-gray-500 block text-xs mb-0.5">PEC</span><span className="text-sm">{selectedCustomer.pec || "—"}</span></div>
@@ -747,6 +774,7 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
     indirizzo_cap: customer.indirizzo_cap || "",
     indirizzo_provincia: customer.indirizzo_provincia || "",
     indirizzo_paese: customer.indirizzo_paese || "IT",
+    tag: customer.tag || "cliente_reale",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -802,12 +830,15 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
       <FormField label="Città"><input type="text" value={form.indirizzo_citta} onChange={e => set("indirizzo_citta", e.target.value)} className={inputCls} /></FormField>
       <FormField label="CAP"><input type="text" value={form.indirizzo_cap} onChange={e => set("indirizzo_cap", e.target.value)} className={inputCls} maxLength={5} /></FormField>
       <FormField label="Provincia"><input type="text" value={form.indirizzo_provincia} onChange={e => set("indirizzo_provincia", e.target.value)} className={inputCls} maxLength={2} /></FormField>
+      <FormField label="Tag"><select value={form.tag} onChange={e => set("tag", e.target.value)} className={selectCls}>
+        {Object.entries(CUSTOMER_TAG_MAP).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+      </select></FormField>
     </div>
     <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-100">
       <label className="flex items-center gap-2 text-xs cursor-pointer">
         <input type="checkbox" checked={syncStripe} onChange={e => setSyncStripe(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
         <span className="text-gray-600">Sincronizza modifiche su Stripe</span>
-        {syncStripe && <span className="text-[10px] text-indigo-500 font-medium">name, email, phone, address, metadata</span>}
+        {syncStripe && <span className="text-[10px] text-indigo-500 font-medium">name, email, phone, address, P.IVA (Tax ID), SDI, PEC</span>}
       </label>
       <div className="flex gap-3">
         <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
