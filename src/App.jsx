@@ -767,7 +767,7 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
               action: "update_customer", customer_id: customer.stripe_customer_id,
               name: form.ragione_sociale, email: form.email, phone: form.phone,
               address: { line1: form.indirizzo_via, city: form.indirizzo_citta, postal_code: form.indirizzo_cap, state: form.indirizzo_provincia, country: form.indirizzo_paese },
-              metadata: { partita_iva: form.partita_iva, codice_fiscale: form.codice_fiscale, codice_sdi: form.codice_sdi, pec: form.pec },
+              partita_iva: form.partita_iva, codice_fiscale: form.codice_fiscale, codice_sdi: form.codice_sdi, pec: form.pec,
             }),
           });
           const data = await resp.json();
