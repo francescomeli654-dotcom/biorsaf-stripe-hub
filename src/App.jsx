@@ -7,6 +7,7 @@ const SUPABASE_URL = "https://pjbdgzkcvbajfcrlrzbs.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqYmRnemtjdmJhamZjcmxyemJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwNzYyODMsImV4cCI6MjA4NTY1MjI4M30.6YGpHPOWHiaTqlO5ZsqjcAYp9Eddxmo3i1KrmcflqMw";
 const N8N_BASE = "https://francescomeli.app.n8n.cloud/webhook";
 const STRIPE_OPS = SUPABASE_URL + "/functions/v1/stripe-ops";
+const INVOICE_PDF_FN = SUPABASE_URL + "/functions/v1/invoice-pdf";
 const PAGE_SIZE = 50;
 
 // ─── SUPABASE HELPERS ───────────────────────────────────────
@@ -86,6 +87,29 @@ const ESERCIZIO_TAG_MAP = {
 };
 
 // ─── CSV EXPORT ─────────────────────────────────────────────
+
+// ─── PDF DOWNLOAD UTILITY ───────────────────────────────────
+async function downloadInvoicePdf(invoiceId, invoiceNumber) {
+  const resp = await fetch(INVOICE_PDF_FN, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
+    body: JSON.stringify({ invoice_id: invoiceId }),
+  });
+  const result = await resp.json();
+  if (!result.success) throw new Error(result.error || "Errore generazione PDF");
+  const byteChars = atob(result.pdf_base64);
+  const byteArr = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+  const blob = new Blob([byteArr], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = result.filename || `Dettaglio_${invoiceNumber || invoiceId}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 function exportCSV(rows, columns, filename) {
   if (!rows.length) return;
   const sep = ";";
@@ -433,6 +457,7 @@ function EserciziPage() {
   const [page, setPage] = useState(0);
   const [selectedEsercizio, setSelectedEsercizio] = useState(null);
   const [esercizioInvoices, setEsercizioInvoices] = useState(undefined);
+  const [esPdfLoading, setEsPdfLoading] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
 
@@ -559,8 +584,8 @@ function EserciziPage() {
       {esercizioInvoices === undefined ? <Spinner />
         : !selectedEsercizio.stripe_subscription_id ? (<p className="text-sm text-gray-400 py-3">Nessuna subscription collegata</p>)
         : esercizioInvoices && esercizioInvoices.length > 0 ? (
-          <table className="w-full text-xs"><thead><tr className="border-b border-gray-200 bg-gray-50"><th className="text-left py-2 px-2">N. Fattura</th><th className="text-left py-2 px-2">Status</th><th className="text-right py-2 px-2">Totale</th><th className="text-left py-2 px-2">Data</th><th className="text-left py-2 px-2">Scadenza</th><th className="text-center py-2 px-2">Link</th></tr></thead>
-          <tbody>{esercizioInvoices.map((inv, j) => (<tr key={j} className="border-b border-gray-50"><td className="py-1.5 px-2 font-mono">{inv.invoice_number || "—"}</td><td className="py-1.5 px-2"><Badge color={inv.status === "paid" ? "green" : inv.status === "open" ? "amber" : "gray"}>{inv.status}</Badge></td><td className="py-1.5 px-2 text-right">{eur(inv.total_eur)}</td><td className="py-1.5 px-2">{fmtDate(inv.invoice_date)}</td><td className="py-1.5 px-2">{fmtDate(inv.due_date)}</td><td className="py-1.5 px-2 text-center">{inv.hosted_invoice_url && <a href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer" className="text-blue-500"><ExternalLink size={12} /></a>}</td></tr>))}</tbody></table>
+          <table className="w-full text-xs"><thead><tr className="border-b border-gray-200 bg-gray-50"><th className="text-left py-2 px-2">N. Fattura</th><th className="text-left py-2 px-2">Status</th><th className="text-right py-2 px-2">Totale</th><th className="text-left py-2 px-2">Data</th><th className="text-left py-2 px-2">Scadenza</th><th className="text-center py-2 px-2">Link</th><th className="text-center py-2 px-2">PDF</th></tr></thead>
+          <tbody>{esercizioInvoices.map((inv, j) => (<tr key={j} className="border-b border-gray-50"><td className="py-1.5 px-2 font-mono">{inv.invoice_number || "—"}</td><td className="py-1.5 px-2"><Badge color={inv.status === "paid" ? "green" : inv.status === "open" ? "amber" : "gray"}>{inv.status}</Badge></td><td className="py-1.5 px-2 text-right">{eur(inv.total_eur)}</td><td className="py-1.5 px-2">{fmtDate(inv.invoice_date)}</td><td className="py-1.5 px-2">{fmtDate(inv.due_date)}</td><td className="py-1.5 px-2 text-center">{inv.hosted_invoice_url && <a href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer" className="text-blue-500"><ExternalLink size={12} /></a>}</td><td className="py-1.5 px-2 text-center"><button onClick={async () => { setEsPdfLoading(inv.stripe_invoice_id); try { await downloadInvoicePdf(inv.stripe_invoice_id, inv.invoice_number); } catch (e) { alert("Errore PDF: " + e.message); } finally { setEsPdfLoading(null); }}} disabled={esPdfLoading === inv.stripe_invoice_id} className="text-indigo-500 hover:text-indigo-700 disabled:opacity-40">{esPdfLoading === inv.stripe_invoice_id ? <Loader2 size={12} className="animate-spin" /> : <FileDown size={12} />}</button></td></tr>))}</tbody></table>
         ) : (<p className="text-sm text-gray-400 py-3">Nessuna fattura</p>)}
     </Modal>)}
 
@@ -1115,66 +1140,15 @@ function InvoicesPage() {
   const [pdfLoading, setPdfLoading] = useState(null);
   useEffect(() => { setPage(0); }, [search, filters]);
 
-  // Generate detailed PDF with esercizio breakdown
+  // Generate detailed PDF with esercizio breakdown via Edge Function
   const generatePDF = async (inv) => {
     setPdfLoading(inv.stripe_invoice_id);
     try {
-      // Fetch esercizio details for this subscription
-      let esDetails = [];
-      if (inv.stripe_subscription_id) {
-        const esResp = await fetch(`${SB_URL}/rest/v1/esercizio_subscription?stripe_subscription_id=eq.${inv.stripe_subscription_id}&select=*,esercizi(esercizio_id,nome_esercizio,indirizzo_via,indirizzo_citta,indirizzo_cap,indirizzo_provincia)`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
-        if (esResp.ok) esDetails = await esResp.json();
-      }
-      // Fetch line items via products for price names
-      let products = [];
-      try {
-        const pResp = await fetch(`${SB_URL}/rest/v1/v_products_with_prices?select=product_id,product_name,price_id,price_nickname,unit_amount`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
-        if (pResp.ok) products = await pResp.json();
-      } catch (_) {}
-      const getProductName = (pid) => products.find(p => p.product_id === pid)?.product_name || pid || "—";
-      const getPriceName = (prid) => { const p = products.find(p => p.price_id === prid); return p ? (p.price_nickname || eur(p.unit_amount / 100)) : prid || "—"; };
-
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Dettaglio Fattura ${inv.invoice_number || inv.stripe_invoice_id}</title>
-<style>body{font-family:system-ui,-apple-system,sans-serif;margin:40px;color:#1a1a1a;font-size:13px}
-h1{font-size:20px;margin-bottom:4px}h2{font-size:15px;color:#555;margin:24px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
-.meta{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0;background:#f9f9f9;padding:16px;border-radius:8px}
-.meta div{font-size:12px}.meta span{display:block;color:#888;font-size:10px;text-transform:uppercase}
-.meta strong{font-size:14px}table{width:100%;border-collapse:collapse;margin:8px 0}
-th{background:#f1f5f9;text-align:left;padding:8px 12px;font-size:11px;color:#555;border-bottom:2px solid #e2e8f0}
-td{padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:12px}.text-right{text-align:right}
-.font-bold{font-weight:700}.totals{margin-top:16px;text-align:right;font-size:14px}
-.totals div{margin:4px 0}.print-btn{position:fixed;top:16px;right:16px;background:#4f46e5;color:#fff;border:none;padding:10px 24px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px}
-@media print{.print-btn{display:none}}</style></head><body>
-<button class="print-btn" onclick="window.print()">🖨 Stampa / Salva PDF</button>
-<h1>Fattura ${inv.invoice_number || "—"}</h1>
-<p style="color:#888;font-size:11px">${inv.stripe_invoice_id}</p>
-<div class="meta">
-  <div><span>Cliente</span><strong>${inv.customer_name || "—"}</strong></div>
-  <div><span>Email</span><strong>${inv.customer_email || "—"}</strong></div>
-  <div><span>Status</span><strong>${inv.status}</strong></div>
-  <div><span>Data Fattura</span><strong>${inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString("it-IT") : "—"}</strong></div>
-  <div><span>Scadenza</span><strong>${inv.due_date ? new Date(inv.due_date).toLocaleDateString("it-IT") : "—"}</strong></div>
-  <div><span>Metodo</span><strong>${inv.collection_method === "send_invoice" ? "Fattura" : "Auto-charge"}</strong></div>
-  <div><span>Subtotale</span><strong>€ ${(inv.subtotal_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
-  <div><span>IVA</span><strong>€ ${(inv.tax_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
-  <div><span>Totale</span><strong style="font-size:18px;color:#059669">€ ${(inv.total_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
-  <div><span>Pagato</span><strong>€ ${(inv.amount_paid_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
-</div>
-${esDetails.length > 0 ? `<h2>Dettaglio per Esercizio (${esDetails.length})</h2>
-<table><thead><tr><th>Esercizio</th><th>ID</th><th>Indirizzo</th><th>Città</th><th>Prodotto</th><th>Prezzo</th><th class="text-right">Utenze</th></tr></thead>
-<tbody>${esDetails.map(es => {
-  const e = es.esercizi || {};
-  return `<tr><td class="font-bold">${e.nome_esercizio || "—"}</td><td style="font-family:monospace;font-size:11px">${e.esercizio_id || es.esercizio_id || "—"}</td>
-<td>${e.indirizzo_via || "—"}</td><td>${e.indirizzo_citta || "—"} ${e.indirizzo_cap || ""} ${e.indirizzo_provincia || ""}</td>
-<td>${getProductName(es.product_id)}</td><td>${getPriceName(es.price_id)}</td><td class="text-right font-bold">${es.utenze_count || 1}</td></tr>`;
-}).join("")}</tbody></table>` : `<h2>Dettaglio Esercizi</h2><p style="color:#888">Nessun mapping esercizio trovato per questa subscription.</p>`}
-<div class="totals"><div>Subscription: <span style="font-family:monospace">${inv.stripe_subscription_id || "—"}</span></div></div>
-<p style="margin-top:32px;color:#aaa;font-size:10px">Generato il ${new Date().toLocaleString("it-IT")} — Biorsaf Finance Hub</p>
-</body></html>`;
-      const w = window.open("", "_blank");
-      w.document.write(html);
-      w.document.close();
-    } catch (err) { console.error("PDF generation error:", err); }
+      await downloadInvoicePdf(inv.stripe_invoice_id, inv.invoice_number);
+    } catch (err) { 
+      console.error("PDF generation error:", err);
+      alert("Errore generazione PDF: " + (err.message || "Errore sconosciuto"));
+    }
     finally { setPdfLoading(null); }
   };
 
