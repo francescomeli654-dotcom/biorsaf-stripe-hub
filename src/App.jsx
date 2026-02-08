@@ -6,6 +6,7 @@ import { Building2, Users, CreditCard, FileText, AlertTriangle, TrendingUp, Chev
 const SUPABASE_URL = "https://pjbdgzkcvbajfcrlrzbs.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqYmRnemtjdmJhamZjcmxyemJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwNzYyODMsImV4cCI6MjA4NTY1MjI4M30.6YGpHPOWHiaTqlO5ZsqjcAYp9Eddxmo3i1KrmcflqMw";
 const N8N_BASE = "https://francescomeli.app.n8n.cloud/webhook";
+const STRIPE_OPS = SUPABASE_URL + "/functions/v1/stripe-ops";
 const PAGE_SIZE = 50;
 
 // ─── SUPABASE HELPERS ───────────────────────────────────────
@@ -760,7 +761,7 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
       // Sync to Stripe if enabled
       if (syncStripe && customer.stripe_customer_id) {
         try {
-          const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+          const resp = await fetch(STRIPE_OPS, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               action: "update_customer", customer_id: customer.stripe_customer_id,
@@ -833,7 +834,7 @@ function ManageSubscriptionModal({ subscriptionId, customerName, onClose, onSucc
     (async () => {
       setLoading(true);
       try {
-        const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+        const resp = await fetch(STRIPE_OPS, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "get_subscription", subscription_id: subscriptionId }),
         });
@@ -860,7 +861,7 @@ function ManageSubscriptionModal({ subscriptionId, customerName, onClose, onSucc
         id: ic.si_id, quantity: ic.quantity, price: ic.price_id,
       }));
       const deleted_items = itemChanges.filter(ic => ic.action === "remove").map(ic => ({ id: ic.si_id, deleted: true }));
-      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+      const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "preview_update", subscription_id: subscriptionId, items: [...items, ...deleted_items], proration_behavior: "create_prorations" }),
       });
@@ -879,7 +880,7 @@ function ManageSubscriptionModal({ subscriptionId, customerName, onClose, onSucc
         id: ic.si_id, quantity: ic.quantity, price: ic.price_id,
       }));
       const deleted_items = itemChanges.filter(ic => ic.action === "remove").map(ic => ({ id: ic.si_id, deleted: true }));
-      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+      const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "update_subscription", subscription_id: subscriptionId, items: [...items, ...deleted_items], proration_behavior: "create_prorations" }),
       });
@@ -901,7 +902,7 @@ function ManageSubscriptionModal({ subscriptionId, customerName, onClose, onSucc
     if (!cancelMode) return;
     setSaving(true); setStatusMsg(null);
     try {
-      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+      const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "cancel_subscription", subscription_id: subscriptionId, cancel_at_period_end: cancelMode === "end_of_period" }),
       });
@@ -1387,7 +1388,7 @@ function CreateSubscriptionPage() {
           override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
         })),
       };
-      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+      const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const data = await resp.json();
@@ -1453,7 +1454,7 @@ function CreateSubscriptionPage() {
     setSaving(true); setStatusMsg(null); setShowStripeConfirm(false);
     try {
       const payload = buildStripePayload();
-      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+      const resp = await fetch(STRIPE_OPS, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const data = await resp.json();
