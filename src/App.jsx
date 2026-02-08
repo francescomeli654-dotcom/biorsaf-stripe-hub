@@ -949,7 +949,7 @@ function InvoicesPage() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SUBSCRIPTION CREATION PAGE — Redesigned
+// SUBSCRIPTION CREATION PAGE — Multi-Product per Esercizio
 // ═══════════════════════════════════════════════════════════════
 function CreateSubscriptionPage() {
   const { data: customers } = useData("customers", "select=stripe_customer_id,ragione_sociale,email&deleted=is.false&order=ragione_sociale.asc");
@@ -959,8 +959,10 @@ function CreateSubscriptionPage() {
   const [step, setStep] = useState(1);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [customerSearch, setCustomerSearch] = useState("");
-  // Each item = { esercizio_id, product_id, price_id, quantity, pricing_mode, override_amount, coupon_id }
-  const [selectedEsercizi, setSelectedEsercizi] = useState([]); // [{esercizio_id, nome_esercizio, ...config}]
+  // Selected esercizi = just metadata, no product config
+  const [selectedEsercizi, setSelectedEsercizi] = useState([]); // [{esercizio_id, nome_esercizio, citta, provincia}]
+  // Product lines = separate array, each esercizio can have N lines
+  const [productLines, setProductLines] = useState([]); // [{id, esercizio_id, product_id, price_id, quantity, pricing_mode, override_amount, coupon_id}]
   const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, billing_interval: "year", start_date: "", tax_rate_id: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
@@ -968,13 +970,15 @@ function CreateSubscriptionPage() {
   const [showStripeConfirm, setShowStripeConfirm] = useState(false);
   const [bulkConfig, setBulkConfig] = useState({ product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: "" });
   const [esSearch, setEsSearch] = useState("");
+  const lineIdRef = useRef(0);
+  const nextId = () => { lineIdRef.current += 1; return lineIdRef.current; };
 
-  // Group products (only recurring)
+  // Group products: recurring only, with full names
   const products = useMemo(() => {
     if (!productsRaw) return [];
     const grouped = {};
     productsRaw.forEach(p => {
-      if (!p.billing_interval) return;
+      if (!p.billing_interval) return; // skip one-time
       if (!grouped[p.stripe_product_id]) grouped[p.stripe_product_id] = { product_name: p.product_name, stripe_product_id: p.stripe_product_id, prices: [] };
       grouped[p.stripe_product_id].prices.push(p);
     });
@@ -984,139 +988,141 @@ function CreateSubscriptionPage() {
   // Available esercizi: belong to customer AND have NO subscription
   const availableEsercizi = useMemo(() => {
     if (!selectedCustomer || !allEsercizi) return [];
-    return allEsercizi.filter(e =>
-      e.customer_id === selectedCustomer.stripe_customer_id &&
-      !e.stripe_subscription_id
-    );
+    return allEsercizi.filter(e => e.customer_id === selectedCustomer.stripe_customer_id && !e.stripe_subscription_id);
   }, [selectedCustomer, allEsercizi]);
 
-  // Filter available esercizi by search
   const filteredAvailable = useMemo(() => {
     if (!esSearch) return availableEsercizi;
     const q = esSearch.toLowerCase();
-    return availableEsercizi.filter(e =>
-      (e.nome_esercizio || "").toLowerCase().includes(q) ||
-      (e.esercizio_id || "").toLowerCase().includes(q) ||
-      (e.citta || "").toLowerCase().includes(q)
-    );
+    return availableEsercizi.filter(e => (e.nome_esercizio || "").toLowerCase().includes(q) || (e.esercizio_id || "").toLowerCase().includes(q) || (e.citta || "").toLowerCase().includes(q));
   }, [availableEsercizi, esSearch]);
 
-  // Already-on-sub count for info
   const alreadyLinkedCount = useMemo(() => {
     if (!selectedCustomer || !allEsercizi) return 0;
     return allEsercizi.filter(e => e.customer_id === selectedCustomer.stripe_customer_id && e.stripe_subscription_id).length;
   }, [selectedCustomer, allEsercizi]);
 
-  const filteredCustomers = customerSearch ? (customers || []).filter(c =>
-    (c.ragione_sociale || "").toLowerCase().includes(customerSearch.toLowerCase()) ||
-    (c.stripe_customer_id || "").toLowerCase().includes(customerSearch.toLowerCase()) ||
-    (c.email || "").toLowerCase().includes(customerSearch.toLowerCase())
-  ).slice(0, 15) : [];
+  const filteredCustomers = customerSearch ? (customers || []).filter(c => (c.ragione_sociale || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.stripe_customer_id || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.email || "").toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 15) : [];
 
   const getPrice = (priceId) => productsRaw?.find(p => p.stripe_price_id === priceId);
+  const getProduct = (productId) => products.find(p => p.stripe_product_id === productId);
 
-  // Toggle select esercizio
+  // Format price display clearly
+  const fmtPrice = (pr) => {
+    if (!pr) return "—";
+    return `${eur(pr.unit_amount / 100)} / ${pr.billing_interval === "year" ? "anno" : pr.billing_interval === "month" ? "mese" : pr.billing_interval}`;
+  };
+
+  // Toggle esercizio selection
   const toggleEsercizio = (es) => {
     setSelectedEsercizi(prev => {
       const exists = prev.find(x => x.esercizio_id === es.esercizio_id);
-      if (exists) return prev.filter(x => x.esercizio_id !== es.esercizio_id);
-      return [...prev, {
-        esercizio_id: es.esercizio_id,
-        nome_esercizio: es.nome_esercizio,
-        citta: es.citta,
-        product_id: "", price_id: "", quantity: 1,
-        pricing_mode: "standard", override_amount: "", coupon_id: ""
-      }];
+      if (exists) {
+        // Deselect: remove esercizio AND its product lines
+        setProductLines(pl => pl.filter(l => l.esercizio_id !== es.esercizio_id));
+        return prev.filter(x => x.esercizio_id !== es.esercizio_id);
+      }
+      return [...prev, { esercizio_id: es.esercizio_id, nome_esercizio: es.nome_esercizio, citta: es.citta, provincia: es.provincia }];
     });
   };
 
   const selectAll = () => {
-    const allIds = new Set(selectedEsercizi.map(x => x.esercizio_id));
-    const newOnes = filteredAvailable.filter(e => !allIds.has(e.esercizio_id)).map(e => ({
-      esercizio_id: e.esercizio_id, nome_esercizio: e.nome_esercizio, citta: e.citta,
-      product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: ""
-    }));
+    const existingIds = new Set(selectedEsercizi.map(x => x.esercizio_id));
+    const newOnes = filteredAvailable.filter(e => !existingIds.has(e.esercizio_id)).map(e => ({ esercizio_id: e.esercizio_id, nome_esercizio: e.nome_esercizio, citta: e.citta, provincia: e.provincia }));
     setSelectedEsercizi(prev => [...prev, ...newOnes]);
   };
 
-  const deselectAll = () => setSelectedEsercizi([]);
+  const deselectAll = () => { setSelectedEsercizi([]); setProductLines([]); };
 
-  const updateEsConfig = (esId, key, value) => {
-    setSelectedEsercizi(prev => prev.map(x => x.esercizio_id === esId ? { ...x, [key]: value } : x));
+  // ─── PRODUCT LINE MANAGEMENT ─────────────────────────────
+  const addLine = (esId) => {
+    setProductLines(prev => [...prev, { id: nextId(), esercizio_id: esId, product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: "" }]);
   };
 
-  // BULK APPLY: copy bulkConfig to all selected esercizi
+  const removeLine = (lineId) => setProductLines(prev => prev.filter(l => l.id !== lineId));
+
+  const updateLine = (lineId, key, value) => {
+    setProductLines(prev => prev.map(l => l.id === lineId ? { ...l, [key]: value } : l));
+  };
+
+  const linesForEs = (esId) => productLines.filter(l => l.esercizio_id === esId);
+
+  // ─── BULK APPLY: ADDS a product line to ALL selected esercizi ───
   const applyBulk = () => {
-    setSelectedEsercizi(prev => prev.map(x => ({
-      ...x,
-      product_id: bulkConfig.product_id || x.product_id,
-      price_id: bulkConfig.price_id || x.price_id,
-      quantity: bulkConfig.quantity || x.quantity,
-      pricing_mode: bulkConfig.pricing_mode || x.pricing_mode,
-      override_amount: bulkConfig.pricing_mode === "override" ? bulkConfig.override_amount : x.override_amount,
-      coupon_id: bulkConfig.coupon_id || x.coupon_id,
-    })));
-    setStatusMsg({ type: "success", text: `Configurazione applicata a ${selectedEsercizi.length} esercizi` });
+    if (!bulkConfig.product_id || !bulkConfig.price_id) return;
+    const newLines = selectedEsercizi.map(es => ({
+      id: nextId(), esercizio_id: es.esercizio_id,
+      product_id: bulkConfig.product_id, price_id: bulkConfig.price_id,
+      quantity: bulkConfig.quantity || 1, pricing_mode: bulkConfig.pricing_mode,
+      override_amount: bulkConfig.pricing_mode === "override" ? bulkConfig.override_amount : "",
+      coupon_id: bulkConfig.coupon_id || "",
+    }));
+    setProductLines(prev => [...prev, ...newLines]);
+    setStatusMsg({ type: "success", text: `"${getProduct(bulkConfig.product_id)?.product_name}" aggiunto a ${selectedEsercizi.length} esercizi` });
   };
 
-  // Calculate unit amount for an item
-  const getUnitAmount = (it) => {
-    if (it.pricing_mode === "override" && it.override_amount) return parseFloat(it.override_amount) * 100;
-    const price = getPrice(it.price_id);
+  // Calculate unit amount for a line
+  const getLineUnitAmount = (line) => {
+    if (line.pricing_mode === "override" && line.override_amount) return parseFloat(line.override_amount) * 100;
+    const price = getPrice(line.price_id);
     return price?.unit_amount || 0;
   };
 
-  const totalAmount = selectedEsercizi.reduce((sum, it) => sum + getUnitAmount(it) * (it.quantity || 1), 0);
+  const getLineTotal = (line) => getLineUnitAmount(line) * (line.quantity || 1);
 
-  // AGGREGATION: group by price_id + pricing_mode + unit_amount for Stripe
+  const totalAmount = productLines.reduce((sum, l) => sum + getLineTotal(l), 0);
+
+  // AGGREGATION: group by price_id + pricing_mode + override_unit_amount + coupon_id
   const aggregatedItems = useMemo(() => {
     const agg = {};
-    selectedEsercizi.forEach(it => {
-      if (!it.product_id || !it.price_id) return;
-      const unitAmt = getUnitAmount(it);
-      const key = `${it.price_id}|${it.pricing_mode}|${unitAmt}|${it.coupon_id || ""}`;
-      if (!agg[key]) agg[key] = { price_id: it.price_id, product_id: it.product_id, pricing_mode: it.pricing_mode, unit_amount: unitAmt, coupon_id: it.coupon_id, quantity: 0, esercizi: [] };
-      agg[key].quantity += (it.quantity || 1);
-      agg[key].esercizi.push(it.esercizio_id);
+    productLines.forEach(line => {
+      if (!line.product_id || !line.price_id) return;
+      const unitAmt = getLineUnitAmount(line);
+      const key = `${line.price_id}|${line.pricing_mode}|${unitAmt}|${line.coupon_id || ""}`;
+      if (!agg[key]) agg[key] = {
+        price_id: line.price_id, product_id: line.product_id, product_name: getProduct(line.product_id)?.product_name || "—",
+        pricing_mode: line.pricing_mode, unit_amount: unitAmt, coupon_id: line.coupon_id, quantity: 0, esercizi: [],
+      };
+      agg[key].quantity += (line.quantity || 1);
+      if (!agg[key].esercizi.includes(line.esercizio_id)) agg[key].esercizi.push(line.esercizio_id);
     });
     return Object.values(agg);
-  }, [selectedEsercizi]);
+  }, [productLines]);
 
-  // Validation
-  const incompleteItems = selectedEsercizi.filter(it => !it.product_id || !it.price_id);
-  const isValid = selectedEsercizi.length > 0 && incompleteItems.length === 0;
+  // Validation: at least one esercizio, each with at least one complete line
+  const eserciziWithLines = new Set(productLines.filter(l => l.product_id && l.price_id).map(l => l.esercizio_id));
+  const eserciziWithoutLines = selectedEsercizi.filter(es => !eserciziWithLines.has(es.esercizio_id));
+  const incompleteLines = productLines.filter(l => !l.product_id || !l.price_id);
+  const isValid = selectedEsercizi.length > 0 && eserciziWithoutLines.length === 0 && incompleteLines.length === 0 && productLines.length > 0;
 
-  // SAVE DRAFT
+  // ─── SAVE DRAFT ──────────────────────────────────────────
   const handleSaveDraft = async () => {
     if (!isValid || !selectedCustomer) return;
     setSaving(true); setStatusMsg(null);
     try {
       const [draft] = await sbPost("subscription_drafts", {
-        stripe_customer_id: selectedCustomer.stripe_customer_id,
-        status: "draft",
-        collection_method: draftSettings.collection_method,
-        days_until_due: draftSettings.days_until_due,
-        billing_interval: draftSettings.billing_interval,
-        start_date: draftSettings.start_date || null,
-        tax_rate_id: draftSettings.tax_rate_id || null,
-        notes: draftSettings.notes || null,
+        stripe_customer_id: selectedCustomer.stripe_customer_id, status: "draft",
+        collection_method: draftSettings.collection_method, days_until_due: draftSettings.days_until_due,
+        billing_interval: draftSettings.billing_interval, start_date: draftSettings.start_date || null,
+        tax_rate_id: draftSettings.tax_rate_id || null, notes: draftSettings.notes || null,
       });
-      for (const it of selectedEsercizi) {
-        const unitAmt = getUnitAmount(it);
+      for (const line of productLines) {
+        if (!line.product_id || !line.price_id) continue;
+        const unitAmt = getLineUnitAmount(line);
         await sbPost("subscription_draft_items", {
-          draft_id: draft.id, esercizio_id: it.esercizio_id, product_id: it.product_id,
-          price_id: it.price_id, quantity: it.quantity || 1, unit_amount: unitAmt,
-          total_amount: unitAmt * (it.quantity || 1), pricing_mode: it.pricing_mode,
-          override_amount: it.pricing_mode === "override" && it.override_amount ? Math.round(parseFloat(it.override_amount) * 100) : null,
+          draft_id: draft.id, esercizio_id: line.esercizio_id, product_id: line.product_id,
+          price_id: line.price_id, quantity: line.quantity || 1, unit_amount: unitAmt,
+          total_amount: unitAmt * (line.quantity || 1), pricing_mode: line.pricing_mode,
+          override_amount: line.pricing_mode === "override" && line.override_amount ? Math.round(parseFloat(line.override_amount) * 100) : null,
         });
       }
       setStatusMsg({ type: "success", text: `Draft #${draft.id} creato — vai a Drafts per approvarlo` });
-      setSelectedEsercizi([]); setStep(1); setSelectedCustomer(null);
+      setSelectedEsercizi([]); setProductLines([]); setStep(1); setSelectedCustomer(null);
     } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
     finally { setSaving(false); }
   };
 
-  // CREATE DIRECTLY IN STRIPE
+  // ─── CREATE DIRECTLY IN STRIPE ───────────────────────────
   const handleCreateStripe = () => setShowStripeConfirm(true);
 
   const buildStripePayload = () => ({
@@ -1128,23 +1134,17 @@ function CreateSubscriptionPage() {
     start_date: draftSettings.start_date || undefined,
     tax_rate_id: draftSettings.tax_rate_id || undefined,
     items: aggregatedItems.map(agg => ({
-      product_id: agg.product_id,
-      price_id: agg.price_id,
-      quantity: agg.quantity,
-      pricing_mode: agg.pricing_mode,
-      unit_amount: agg.unit_amount,
+      product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
+      pricing_mode: agg.pricing_mode, unit_amount: agg.unit_amount,
       override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
       coupon_id: agg.coupon_id || undefined,
     })),
-    esercizio_detail: selectedEsercizi.map(it => ({
-      esercizio_id: it.esercizio_id,
-      product_id: it.product_id,
-      price_id: it.price_id,
-      quantity: it.quantity || 1,
-      pricing_mode: it.pricing_mode,
-      unit_amount: getUnitAmount(it),
-      override_unit_amount: it.pricing_mode === "override" ? getUnitAmount(it) : undefined,
-      coupon_id: it.coupon_id || undefined,
+    esercizio_detail: productLines.filter(l => l.product_id && l.price_id).map(l => ({
+      esercizio_id: l.esercizio_id, product_id: l.product_id, price_id: l.price_id,
+      quantity: l.quantity || 1, pricing_mode: l.pricing_mode,
+      unit_amount: getLineUnitAmount(l),
+      override_unit_amount: l.pricing_mode === "override" ? getLineUnitAmount(l) : undefined,
+      coupon_id: l.coupon_id || undefined,
     })),
   });
 
@@ -1158,7 +1158,7 @@ function CreateSubscriptionPage() {
       const data = await resp.json();
       if (data.success !== false && !data.error) {
         setStatusMsg({ type: "success", text: `Subscription creata in Stripe: ${data.subscription_id || "OK"}` });
-        setSelectedEsercizi([]); setStep(1); setSelectedCustomer(null);
+        setSelectedEsercizi([]); setProductLines([]); setStep(1); setSelectedCustomer(null);
         reloadEsercizi();
       } else {
         setStatusMsg({ type: "error", text: "Errore Stripe: " + (data.message || data.error || JSON.stringify(data)) });
@@ -1167,7 +1167,7 @@ function CreateSubscriptionPage() {
     finally { setSaving(false); }
   };
 
-  // QUICK CREATE ESERCIZIO (inline)
+  // ─── QUICK CREATE ESERCIZIO ──────────────────────────────
   const QuickCreateInline = () => {
     const [qf, setQf] = useState({ esercizio_id: "", nome_esercizio: "", citta: "", provincia: "" });
     const [qSaving, setQSaving] = useState(false);
@@ -1199,13 +1199,75 @@ function CreateSubscriptionPage() {
     </div>);
   };
 
+  // ─── PRODUCT LINE ROW COMPONENT ──────────────────────────
+  const ProductLineRow = ({ line, canRemove }) => {
+    const selectedProduct = getProduct(line.product_id);
+    const selectedPrice = getPrice(line.price_id);
+    const catalogPrice = selectedPrice ? eur(selectedPrice.unit_amount / 100) : null;
+    const effectiveAmount = getLineUnitAmount(line);
+
+    return (<div className="flex items-start gap-2 py-2 border-b border-gray-100 last:border-0">
+      {/* Product */}
+      <div className="flex-1 min-w-0">
+        <select value={line.product_id} onChange={e => { updateLine(line.id, "product_id", e.target.value); updateLine(line.id, "price_id", ""); }} className={selectCls + " text-xs"}>
+          <option value="">— Seleziona Prodotto —</option>
+          {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{p.product_name}</option>)}
+        </select>
+      </div>
+      {/* Price */}
+      <div className="w-52">
+        <select value={line.price_id} onChange={e => updateLine(line.id, "price_id", e.target.value)} className={selectCls + " text-xs"}>
+          <option value="">— Prezzo —</option>
+          {selectedProduct?.prices.map(pr => (
+            <option key={pr.stripe_price_id} value={pr.stripe_price_id}>
+              {eur(pr.unit_amount / 100)} / {pr.billing_interval === "year" ? "anno" : "mese"}{!pr.price_active ? " ⚠ inattivo" : ""}
+            </option>
+          ))}
+        </select>
+        {selectedPrice && <p className="text-[10px] text-gray-400 mt-0.5 px-1">Prezzo catalogo: <strong>{eur(selectedPrice.unit_amount / 100)}</strong> / {selectedPrice.billing_interval === "year" ? "anno" : "mese"}</p>}
+      </div>
+      {/* Qty */}
+      <div className="w-16">
+        <input type="number" min="1" value={line.quantity} onChange={e => updateLine(line.id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-xs text-center"} />
+      </div>
+      {/* Pricing mode */}
+      <div className="w-44">
+        <select value={line.pricing_mode} onChange={e => updateLine(line.id, "pricing_mode", e.target.value)} className={selectCls + " text-xs"}>
+          <option value="standard">Prezzo Catalogo</option>
+          <option value="override">Prezzo Personalizzato</option>
+        </select>
+      </div>
+      {/* Override amount */}
+      <div className="w-28">
+        {line.pricing_mode === "override" ? (
+          <div>
+            <input type="number" step="0.01" value={line.override_amount} onChange={e => updateLine(line.id, "override_amount", e.target.value)} className={inputCls + " text-xs"} placeholder="€ custom" />
+            {catalogPrice && line.override_amount && <p className="text-[10px] text-amber-600 mt-0.5 px-1">Catalogo: {catalogPrice}</p>}
+          </div>
+        ) : <div className="py-2 text-xs text-gray-400 text-center">—</div>}
+      </div>
+      {/* Coupon */}
+      <div className="w-28">
+        <input type="text" value={line.coupon_id} onChange={e => updateLine(line.id, "coupon_id", e.target.value)} className={inputCls + " text-xs"} placeholder="Coupon" />
+      </div>
+      {/* Subtotal */}
+      <div className="w-24 text-right py-2">
+        <span className="text-xs font-bold text-gray-900">{line.product_id && line.price_id ? eur(effectiveAmount * (line.quantity || 1) / 100) : "—"}</span>
+      </div>
+      {/* Remove */}
+      <div className="w-8 py-2">
+        {canRemove && <button onClick={() => removeLine(line.id)} className="text-red-300 hover:text-red-500"><Trash2 size={13} /></button>}
+      </div>
+    </div>);
+  };
+
   return (<div className="space-y-5">
-    <div><h1 className="text-2xl font-bold text-gray-900">Crea Subscription</h1><p className="text-sm text-gray-500 mt-0.5">Seleziona esercizi, configura prodotti, salva o invia a Stripe</p></div>
+    <div><h1 className="text-2xl font-bold text-gray-900">Crea Subscription</h1><p className="text-sm text-gray-500 mt-0.5">Seleziona esercizi → aggiungi prodotti → salva o invia a Stripe</p></div>
     <StatusMessage msg={statusMsg} onClear={() => setStatusMsg(null)} />
 
     {/* STEP INDICATOR */}
     <div className="flex items-center gap-3">
-      {[{ n: 1, label: "Cliente" }, { n: 2, label: "Esercizi" }, { n: 3, label: "Configura" }, { n: 4, label: "Riepilogo" }].map(({ n, label }) => (
+      {[{ n: 1, label: "Cliente" }, { n: 2, label: "Esercizi" }, { n: 3, label: "Prodotti" }, { n: 4, label: "Riepilogo" }].map(({ n, label }) => (
         <button key={n} onClick={() => {
           if (n === 1) setStep(1);
           if (n === 2 && selectedCustomer) setStep(2);
@@ -1223,10 +1285,10 @@ function CreateSubscriptionPage() {
       <SearchBar value={customerSearch} onChange={setCustomerSearch} placeholder="Cerca per ragione sociale, email o customer ID..." />
       {selectedCustomer && (<div className="mt-3 p-4 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-between">
         <div><p className="font-bold text-indigo-900">{selectedCustomer.ragione_sociale}</p><p className="text-xs text-indigo-600 font-mono">{selectedCustomer.stripe_customer_id}</p></div>
-        <div className="flex gap-2"><button onClick={() => { setSelectedCustomer(null); setSelectedEsercizi([]); }} className="text-xs text-red-500 hover:text-red-700">Cambia</button><button onClick={() => setStep(2)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Avanti →</button></div>
+        <div className="flex gap-2"><button onClick={() => { setSelectedCustomer(null); setSelectedEsercizi([]); setProductLines([]); }} className="text-xs text-red-500 hover:text-red-700">Cambia</button><button onClick={() => setStep(2)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Avanti →</button></div>
       </div>)}
       {!selectedCustomer && customerSearch && (<div className="mt-2 max-h-64 overflow-y-auto border border-gray-200 rounded-xl">
-        {filteredCustomers.map(c => (<button key={c.stripe_customer_id} onClick={() => { setSelectedCustomer(c); setCustomerSearch(""); setSelectedEsercizi([]); }} className="w-full text-left px-4 py-3 text-sm hover:bg-indigo-50 border-b border-gray-50 last:border-0">
+        {filteredCustomers.map(c => (<button key={c.stripe_customer_id} onClick={() => { setSelectedCustomer(c); setCustomerSearch(""); setSelectedEsercizi([]); setProductLines([]); }} className="w-full text-left px-4 py-3 text-sm hover:bg-indigo-50 border-b border-gray-50 last:border-0">
           <p className="font-medium text-gray-900">{c.ragione_sociale || "—"}</p>
           <p className="text-xs text-gray-400">{c.email || ""} — <span className="font-mono">{c.stripe_customer_id}</span></p>
         </button>))}
@@ -1240,7 +1302,7 @@ function CreateSubscriptionPage() {
         <div className="flex items-center justify-between mb-2">
           <div>
             <h3 className="text-sm font-bold text-gray-700">Esercizi Disponibili</h3>
-            <p className="text-xs text-gray-400 mt-0.5">{availableEsercizi.length} senza subscription — {alreadyLinkedCount} già collegati (nascosti)</p>
+            <p className="text-xs text-gray-400 mt-0.5">{availableEsercizi.length} senza subscription — {alreadyLinkedCount} già collegati a una sub (nascosti)</p>
           </div>
           <div className="flex gap-2">
             <button onClick={() => setShowQuickCreate(!showQuickCreate)} className="flex items-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100"><Plus size={14} /> Crea Esercizio</button>
@@ -1248,31 +1310,20 @@ function CreateSubscriptionPage() {
             {selectedEsercizi.length > 0 && <button onClick={deselectAll} className="px-3 py-2 text-red-500 text-xs font-bold rounded-lg hover:bg-red-50">Deseleziona</button>}
           </div>
         </div>
-
         {showQuickCreate && <QuickCreateInline />}
-
         <div className="mt-3"><SearchBar value={esSearch} onChange={setEsSearch} placeholder="Filtra esercizi per nome, ID, città..." /></div>
-
         {selectedEsercizi.length > 0 && (
           <div className="mt-3 p-3 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-between">
             <span className="text-xs font-bold text-indigo-800">{selectedEsercizi.length} esercizi selezionati</span>
             <button onClick={() => setStep(3)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Configura Prodotti →</button>
           </div>
         )}
-
         <div className="mt-3 max-h-96 overflow-y-auto border border-gray-200 rounded-xl">
-          {filteredAvailable.length === 0 ? (
-            <div className="p-6 text-center text-gray-400 text-sm">
-              {availableEsercizi.length === 0
-                ? "Nessun esercizio disponibile per questo cliente. Tutti già in subscription o nessuno collegato."
-                : "Nessun risultato per la ricerca"}
-            </div>
+          {filteredAvailable.length === 0 ? (<div className="p-6 text-center text-gray-400 text-sm">{availableEsercizi.length === 0 ? "Nessun esercizio disponibile — tutti già in subscription o nessuno collegato." : "Nessun risultato per la ricerca"}</div>
           ) : filteredAvailable.map(es => {
             const isSelected = selectedEsercizi.some(x => x.esercizio_id === es.esercizio_id);
             return (<button key={es.esercizio_id} onClick={() => toggleEsercizio(es)} className={`w-full text-left px-4 py-3 border-b border-gray-50 last:border-0 flex items-center gap-3 transition-all ${isSelected ? "bg-indigo-50" : "hover:bg-gray-50"}`}>
-              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${isSelected ? "bg-indigo-600 border-indigo-600" : "border-gray-300"}`}>
-                {isSelected && <CheckCircle size={12} className="text-white" />}
-              </div>
+              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${isSelected ? "bg-indigo-600 border-indigo-600" : "border-gray-300"}`}>{isSelected && <CheckCircle size={12} className="text-white" />}</div>
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-gray-900 text-sm truncate">{es.nome_esercizio}</p>
                 <p className="text-[10px] text-gray-400"><span className="font-mono">{es.esercizio_id}</span>{es.citta && ` — ${es.citta}`}{es.provincia && ` (${es.provincia})`}</p>
@@ -1282,98 +1333,107 @@ function CreateSubscriptionPage() {
           })}
         </div>
       </div>
-
       <div className="flex items-center justify-between">
         <button onClick={() => setStep(1)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Indietro</button>
         {selectedEsercizi.length > 0 && <button onClick={() => setStep(3)} className="px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700">Configura Prodotti →</button>}
       </div>
     </div>)}
 
-    {/* ─── STEP 3: CONFIGURE PRODUCTS PER ESERCIZIO ─── */}
+    {/* ─── STEP 3: PRODUCTS PER ESERCIZIO (multi-product) ─── */}
     {step === 3 && (<div className="space-y-4">
-      {/* BULK CONFIGURATOR */}
+      {/* BULK ADD: aggiunge un prodotto a TUTTI gli esercizi */}
       <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-2xl p-5">
-        <h3 className="text-sm font-bold text-indigo-900 mb-1 flex items-center gap-2"><Copy size={16} /> Configurazione Bulk — Applica a Tutti</h3>
-        <p className="text-xs text-indigo-600 mb-4">Seleziona prodotto, prezzo e opzioni qui, poi clicca "Applica" per copiarli su tutti i {selectedEsercizi.length} esercizi. Puoi poi personalizzare singoli esercizi nella sezione sotto.</p>
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <h3 className="text-sm font-bold text-indigo-900 mb-1 flex items-center gap-2"><Copy size={16} /> Aggiungi Prodotto in Bulk</h3>
+        <p className="text-xs text-indigo-600 mb-4">Seleziona un prodotto e clicca "Aggiungi a tutti": verrà aggiunta una riga prodotto a ciascuno dei {selectedEsercizi.length} esercizi. Puoi ripetere per aggiungere più prodotti diversi.</p>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
           <FormField label="Prodotto">
             <select value={bulkConfig.product_id} onChange={e => setBulkConfig(p => ({ ...p, product_id: e.target.value, price_id: "" }))} className={selectCls + " text-xs"}>
               <option value="">Seleziona...</option>
-              {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{shortName(p.product_name)}</option>)}
+              {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{p.product_name}</option>)}
             </select>
           </FormField>
           <FormField label="Prezzo">
             <select value={bulkConfig.price_id} onChange={e => setBulkConfig(p => ({ ...p, price_id: e.target.value }))} className={selectCls + " text-xs"}>
               <option value="">Seleziona...</option>
-              {bulkConfig.product_id && products.find(p => p.stripe_product_id === bulkConfig.product_id)?.prices.map(pr => (
-                <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.billing_interval}{pr.price_active ? "" : " ⚠"}</option>
+              {bulkConfig.product_id && getProduct(bulkConfig.product_id)?.prices.map(pr => (
+                <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.billing_interval === "year" ? "anno" : "mese"}{!pr.price_active ? " ⚠" : ""}</option>
               ))}
             </select>
+            {bulkConfig.price_id && <p className="text-[10px] text-indigo-500 mt-0.5 px-1">Catalogo: <strong>{fmtPrice(getPrice(bulkConfig.price_id))}</strong></p>}
           </FormField>
           <FormField label="Qtà">
             <input type="number" min="1" value={bulkConfig.quantity} onChange={e => setBulkConfig(p => ({ ...p, quantity: parseInt(e.target.value) || 1 }))} className={inputCls + " text-xs"} />
           </FormField>
-          <FormField label="Pricing">
+          <FormField label="Tipo Prezzo">
             <select value={bulkConfig.pricing_mode} onChange={e => setBulkConfig(p => ({ ...p, pricing_mode: e.target.value }))} className={selectCls + " text-xs"}>
-              <option value="standard">Standard</option>
-              <option value="override">Override</option>
+              <option value="standard">Prezzo Catalogo</option>
+              <option value="override">Prezzo Personalizzato</option>
             </select>
           </FormField>
           {bulkConfig.pricing_mode === "override" && (
-            <FormField label="Override €">
-              <input type="number" step="0.01" value={bulkConfig.override_amount} onChange={e => setBulkConfig(p => ({ ...p, override_amount: e.target.value }))} className={inputCls + " text-xs"} placeholder="170.00" />
+            <FormField label="Prezzo Custom (€)" hint="Ignora il catalogo, usa questo importo">
+              <input type="number" step="0.01" value={bulkConfig.override_amount} onChange={e => setBulkConfig(p => ({ ...p, override_amount: e.target.value }))} className={inputCls + " text-xs"} placeholder="es: 170.00" />
             </FormField>
           )}
           <FormField label="Coupon ID">
             <input type="text" value={bulkConfig.coupon_id} onChange={e => setBulkConfig(p => ({ ...p, coupon_id: e.target.value }))} className={inputCls + " text-xs"} placeholder="opzionale" />
           </FormField>
-        </div>
-        <button onClick={applyBulk} disabled={!bulkConfig.product_id || !bulkConfig.price_id} className="mt-3 px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30 flex items-center gap-1.5"><Copy size={14} /> Applica a tutti ({selectedEsercizi.length})</button>
-      </div>
-
-      {/* PER-ESERCIZIO CONFIG */}
-      <div className="bg-white border border-gray-100 rounded-2xl p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-sm font-bold text-gray-700">{selectedEsercizi.length} Esercizi — Personalizzazione Singola</h3>
-            <p className="text-xs text-gray-400">Se hai usato il Bulk, qui sotto puoi modificare eccezioni specifiche per singolo esercizio</p>
+          <div className="flex items-end">
+            <button onClick={applyBulk} disabled={!bulkConfig.product_id || !bulkConfig.price_id} className="w-full px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30 flex items-center justify-center gap-1.5"><Plus size={14} /> Aggiungi a tutti ({selectedEsercizi.length})</button>
           </div>
         </div>
-        <div className="space-y-2 max-h-[50vh] overflow-y-auto">
-          {selectedEsercizi.map((it, idx) => {
-            const isComplete = it.product_id && it.price_id;
-            return (<div key={it.esercizio_id} className={`p-3 border rounded-xl transition-all ${isComplete ? "border-emerald-200 bg-emerald-50/30" : "border-amber-200 bg-amber-50/30"}`}>
-              <div className="flex items-center gap-3 mb-2">
-                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${isComplete ? "bg-emerald-600 text-white" : "bg-amber-400 text-white"}`}>{isComplete ? "✓" : idx + 1}</span>
-                <div className="flex-1 min-w-0">
-                  <span className="font-medium text-gray-900 text-sm">{it.nome_esercizio}</span>
-                  <span className="text-[10px] text-gray-400 ml-2 font-mono">{it.esercizio_id}</span>
-                  {it.citta && <span className="text-[10px] text-gray-400 ml-1">— {it.citta}</span>}
+      </div>
+
+      {/* PER-ESERCIZIO: each esercizio shows its product lines */}
+      <div className="bg-white border border-gray-100 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <h3 className="text-sm font-bold text-gray-700">Dettaglio per Esercizio</h3>
+            <p className="text-xs text-gray-400">Ogni esercizio può avere più prodotti. Usa + per aggiungere, 🗑 per rimuovere una riga.</p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-500">Righe totali: <span className="font-bold">{productLines.length}</span></p>
+            <p className="text-sm font-bold text-gray-900">Totale: {eur(totalAmount / 100)}</p>
+          </div>
+        </div>
+
+        {/* Column headers */}
+        <div className="flex items-center gap-2 py-2 px-1 border-b-2 border-gray-200 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
+          <div className="flex-1">Prodotto</div>
+          <div className="w-52">Prezzo</div>
+          <div className="w-16 text-center">Qtà</div>
+          <div className="w-44">Tipo Prezzo</div>
+          <div className="w-28">Custom €</div>
+          <div className="w-28">Coupon</div>
+          <div className="w-24 text-right">Subtotale</div>
+          <div className="w-8"></div>
+        </div>
+
+        <div className="space-y-4 mt-3 max-h-[55vh] overflow-y-auto">
+          {selectedEsercizi.map(es => {
+            const lines = linesForEs(es.esercizio_id);
+            const esTotal = lines.reduce((s, l) => s + getLineTotal(l), 0);
+            const hasLines = lines.length > 0;
+            const allComplete = lines.every(l => l.product_id && l.price_id);
+
+            return (<div key={es.esercizio_id} className={`border rounded-xl p-3 transition-all ${!hasLines ? "border-amber-300 bg-amber-50/40" : allComplete ? "border-emerald-200 bg-emerald-50/20" : "border-amber-200 bg-amber-50/20"}`}>
+              {/* Esercizio header */}
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${hasLines && allComplete ? "bg-emerald-600 text-white" : "bg-amber-400 text-white"}`}>{hasLines && allComplete ? "✓" : "!"}</span>
+                  <span className="font-bold text-sm text-gray-900">{es.nome_esercizio}</span>
+                  <span className="text-[10px] text-gray-400 font-mono">{es.esercizio_id}</span>
+                  {es.citta && <span className="text-[10px] text-gray-400">— {es.citta}</span>}
                 </div>
-                <span className="text-xs font-bold text-gray-700">{isComplete ? eur(getUnitAmount(it) * (it.quantity || 1) / 100) : "—"}</span>
-                <button onClick={() => setSelectedEsercizi(prev => prev.filter(x => x.esercizio_id !== it.esercizio_id))} className="text-red-300 hover:text-red-500 flex-shrink-0"><X size={14} /></button>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-bold text-gray-700">{hasLines ? eur(esTotal / 100) : "Nessun prodotto"}</span>
+                  <button onClick={() => addLine(es.esercizio_id)} className="flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-700 text-[10px] font-bold rounded-lg hover:bg-indigo-100"><Plus size={12} /> Aggiungi Prodotto</button>
+                </div>
               </div>
-              <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-                <select value={it.product_id} onChange={e => { updateEsConfig(it.esercizio_id, "product_id", e.target.value); updateEsConfig(it.esercizio_id, "price_id", ""); }} className={selectCls + " text-[11px] py-1.5"}>
-                  <option value="">Prodotto *</option>
-                  {products.map(p => <option key={p.stripe_product_id} value={p.stripe_product_id}>{shortName(p.product_name)}</option>)}
-                </select>
-                <select value={it.price_id} onChange={e => updateEsConfig(it.esercizio_id, "price_id", e.target.value)} className={selectCls + " text-[11px] py-1.5"}>
-                  <option value="">Prezzo *</option>
-                  {it.product_id && products.find(p => p.stripe_product_id === it.product_id)?.prices.map(pr => (
-                    <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)}/{pr.billing_interval}</option>
-                  ))}
-                </select>
-                <input type="number" min="1" value={it.quantity} onChange={e => updateEsConfig(it.esercizio_id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-[11px] py-1.5"} placeholder="Qtà" />
-                <select value={it.pricing_mode} onChange={e => updateEsConfig(it.esercizio_id, "pricing_mode", e.target.value)} className={selectCls + " text-[11px] py-1.5"}>
-                  <option value="standard">Standard</option>
-                  <option value="override">Override</option>
-                </select>
-                {it.pricing_mode === "override" && (
-                  <input type="number" step="0.01" value={it.override_amount} onChange={e => updateEsConfig(it.esercizio_id, "override_amount", e.target.value)} className={inputCls + " text-[11px] py-1.5"} placeholder="€ override" />
-                )}
-                <input type="text" value={it.coupon_id} onChange={e => updateEsConfig(it.esercizio_id, "coupon_id", e.target.value)} className={inputCls + " text-[11px] py-1.5"} placeholder="Coupon" />
-              </div>
+              {/* Product lines */}
+              {lines.length === 0 ? (
+                <div className="text-center py-3"><p className="text-xs text-amber-600">Nessun prodotto assegnato. Usa il Bulk sopra o clicca "+ Aggiungi Prodotto".</p></div>
+              ) : lines.map(line => <ProductLineRow key={line.id} line={line} canRemove={true} />)}
             </div>);
           })}
         </div>
@@ -1395,7 +1455,8 @@ function CreateSubscriptionPage() {
         <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Esercizi</button>
         <div className="text-right">
           <p className="text-xs text-gray-500">Totale: <span className="text-lg font-bold text-gray-900">{eur(totalAmount / 100)}</span> / {draftSettings.billing_interval}</p>
-          {incompleteItems.length > 0 && <p className="text-[10px] text-amber-600 mt-0.5">{incompleteItems.length} esercizi incompleti</p>}
+          {eserciziWithoutLines.length > 0 && <p className="text-[10px] text-amber-600 mt-0.5">{eserciziWithoutLines.length} esercizi senza prodotti</p>}
+          {incompleteLines.length > 0 && <p className="text-[10px] text-amber-600">{incompleteLines.length} righe incomplete</p>}
           <button onClick={() => setStep(4)} disabled={!isValid} className="mt-1 px-6 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-30">Riepilogo →</button>
         </div>
       </div>
@@ -1408,48 +1469,50 @@ function CreateSubscriptionPage() {
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-5 pb-4 border-b border-gray-100">
           <div><span className="text-gray-500 block text-xs">Cliente</span><span className="font-bold text-sm">{selectedCustomer?.ragione_sociale}</span></div>
           <div><span className="text-gray-500 block text-xs">Esercizi</span><span className="font-bold">{selectedEsercizi.length}</span></div>
-          <div><span className="text-gray-500 block text-xs">Aggregated Items</span><span className="font-bold">{aggregatedItems.length}</span></div>
-          <div><span className="text-gray-500 block text-xs">Billing</span><span className="font-bold">{draftSettings.billing_interval}</span></div>
-          <div><span className="text-gray-500 block text-xs">Totale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span></div>
+          <div><span className="text-gray-500 block text-xs">Righe prodotto</span><span className="font-bold">{productLines.length}</span></div>
+          <div><span className="text-gray-500 block text-xs">Items Stripe (aggregati)</span><span className="font-bold">{aggregatedItems.length}</span></div>
+          <div><span className="text-gray-500 block text-xs">Totale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {draftSettings.billing_interval === "year" ? "anno" : "mese"}</span></div>
         </div>
 
         {/* AGGREGATION TABLE */}
-        <h4 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5"><Package size={14} /> Subscription Items (aggregati per Stripe)</h4>
-        <p className="text-[10px] text-gray-400 mb-3">Esercizi con stesso prodotto/prezzo/pricing vengono raggruppati in un unico item Stripe</p>
+        <h4 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5"><Package size={14} /> Items Stripe (dopo aggregazione)</h4>
+        <p className="text-[10px] text-gray-400 mb-3">Righe con stesso prodotto, prezzo, tipo pricing e coupon vengono raggruppate in un unico item Stripe con quantità cumulata</p>
         <table className="w-full text-xs mb-5"><thead><tr className="border-b border-gray-200 bg-gray-50">
-          <th className="text-left py-2 px-3">Prodotto</th><th className="text-left py-2 px-3">Price ID</th>
-          <th className="text-right py-2 px-3">Unit €</th><th className="text-right py-2 px-3">Qtà Aggregata</th>
-          <th className="text-right py-2 px-3">Subtotale</th><th className="text-left py-2 px-3">Pricing</th>
+          <th className="text-left py-2 px-3">Prodotto</th>
+          <th className="text-right py-2 px-3">Prezzo Unitario</th>
+          <th className="text-right py-2 px-3">Qtà</th>
+          <th className="text-right py-2 px-3">Subtotale</th>
+          <th className="text-left py-2 px-3">Tipo</th>
           <th className="text-left py-2 px-3">Esercizi</th>
         </tr></thead><tbody>{aggregatedItems.map((agg, i) => (
           <tr key={i} className="border-b border-gray-50">
-            <td className="py-2 px-3 font-medium">{shortName(products.find(p => p.stripe_product_id === agg.product_id)?.product_name)}</td>
-            <td className="py-2 px-3 font-mono text-[10px] text-gray-400">{agg.price_id?.slice(-12)}</td>
+            <td className="py-2 px-3 font-medium">{agg.product_name}</td>
             <td className="py-2 px-3 text-right">{eur(agg.unit_amount / 100)}</td>
             <td className="py-2 px-3 text-right font-bold">{agg.quantity}</td>
             <td className="py-2 px-3 text-right font-bold text-indigo-700">{eur(agg.unit_amount * agg.quantity / 100)}</td>
-            <td className="py-2 px-3">{agg.pricing_mode === "override" ? <Badge color="amber">Override</Badge> : <Badge color="green">Standard</Badge>}{agg.coupon_id && <Badge color="purple">Coupon</Badge>}</td>
+            <td className="py-2 px-3">{agg.pricing_mode === "override" ? <Badge color="amber">Personalizzato</Badge> : <Badge color="green">Catalogo</Badge>}{agg.coupon_id && <span className="ml-1"><Badge color="purple">Coupon</Badge></span>}</td>
             <td className="py-2 px-3 text-[10px] text-gray-500">{agg.esercizi.length} esercizi</td>
           </tr>
         ))}</tbody></table>
 
-        {/* DETAIL: per-esercizio */}
+        {/* DETAIL: per-esercizio with all product lines */}
         <details className="group">
-          <summary className="text-xs font-bold text-gray-500 cursor-pointer hover:text-gray-700 mb-2">Dettaglio per esercizio ({selectedEsercizi.length})</summary>
-          <table className="w-full text-[11px]"><thead><tr className="border-b border-gray-200 bg-gray-50/50">
-            <th className="text-left py-1.5 px-2">Esercizio</th><th className="text-left py-1.5 px-2">Prodotto</th>
-            <th className="text-right py-1.5 px-2">€/unità</th><th className="text-right py-1.5 px-2">Qtà</th>
-            <th className="text-right py-1.5 px-2">Subtot</th><th className="text-left py-1.5 px-2">Coupon</th>
-          </tr></thead><tbody>{selectedEsercizi.map((it, i) => (
-            <tr key={i} className="border-b border-gray-50">
-              <td className="py-1.5 px-2">{it.nome_esercizio} <span className="text-gray-400 font-mono">({it.esercizio_id})</span></td>
-              <td className="py-1.5 px-2">{shortName(products.find(p => p.stripe_product_id === it.product_id)?.product_name)}</td>
-              <td className="py-1.5 px-2 text-right">{eur(getUnitAmount(it) / 100)}</td>
-              <td className="py-1.5 px-2 text-right">{it.quantity}</td>
-              <td className="py-1.5 px-2 text-right font-bold">{eur(getUnitAmount(it) * (it.quantity || 1) / 100)}</td>
-              <td className="py-1.5 px-2 text-gray-400">{it.coupon_id || "—"}</td>
-            </tr>
-          ))}</tbody></table>
+          <summary className="text-xs font-bold text-gray-500 cursor-pointer hover:text-gray-700 mb-2">Dettaglio per esercizio ({selectedEsercizi.length} esercizi, {productLines.length} righe)</summary>
+          {selectedEsercizi.map(es => {
+            const lines = linesForEs(es.esercizio_id);
+            return (<div key={es.esercizio_id} className="mb-3">
+              <p className="text-xs font-bold text-gray-700 mb-1">{es.nome_esercizio} <span className="text-gray-400 font-mono font-normal">({es.esercizio_id})</span></p>
+              <table className="w-full text-[11px] mb-1"><tbody>{lines.map((l, j) => (
+                <tr key={j} className="border-b border-gray-50">
+                  <td className="py-1 px-2">{getProduct(l.product_id)?.product_name || "—"}</td>
+                  <td className="py-1 px-2 text-right">{eur(getLineUnitAmount(l) / 100)}</td>
+                  <td className="py-1 px-2 text-right">×{l.quantity}</td>
+                  <td className="py-1 px-2 text-right font-bold">{eur(getLineTotal(l) / 100)}</td>
+                  <td className="py-1 px-2 text-gray-400">{l.pricing_mode === "override" ? "custom" : "catalogo"}{l.coupon_id ? ` | coupon: ${l.coupon_id}` : ""}</td>
+                </tr>
+              ))}</tbody></table>
+            </div>);
+          })}
         </details>
       </div>
 
@@ -1467,7 +1530,7 @@ function CreateSubscriptionPage() {
       <div className="space-y-4">
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
           <p className="text-sm font-medium text-amber-900 flex items-center gap-2"><AlertTriangle size={16} /> Stai per creare una subscription reale in Stripe</p>
-          <p className="text-xs text-amber-700 mt-2">Questa azione creerà immediatamente la subscription per <strong>{selectedCustomer?.ragione_sociale}</strong> con {aggregatedItems.length} item(s) per un totale di <strong>{eur(totalAmount / 100)}</strong> / {draftSettings.billing_interval}.</p>
+          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Totale: <strong>{eur(totalAmount / 100)}</strong> / {draftSettings.billing_interval === "year" ? "anno" : "mese"}.</p>
         </div>
         <div className="flex justify-end gap-3">
           <button onClick={() => setShowStripeConfirm(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
