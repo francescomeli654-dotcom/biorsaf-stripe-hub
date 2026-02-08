@@ -1270,7 +1270,7 @@ function CreateSubscriptionPage() {
   const [selectedEsercizi, setSelectedEsercizi] = useState([]); // [{esercizio_id, nome_esercizio, citta, provincia}]
   // Product lines = separate array, each esercizio can have N lines
   const [productLines, setProductLines] = useState([]); // [{id, esercizio_id, product_id, price_id, quantity, pricing_mode, override_amount, coupon_id}]
-  const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, start_date: "", tax_rate_id: "", notes: "" });
+  const [draftSettings, setDraftSettings] = useState({ collection_method: "send_invoice", days_until_due: 30, start_date: "", first_invoice: "at_start", notes: "" });
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
   const [showQuickCreate, setShowQuickCreate] = useState(false);
@@ -1418,6 +1418,14 @@ function CreateSubscriptionPage() {
   const incompleteLines = productLines.filter(l => !l.product_id || !l.price_id);
   const isValid = selectedEsercizi.length > 0 && eserciziWithoutLines.length === 0 && incompleteLines.length === 0 && productLines.length > 0 && detectedInterval !== "mixed";
 
+  // Is start date in the future?
+  const isFutureStart = useMemo(() => {
+    if (!draftSettings.start_date) return false;
+    const selected = new Date(draftSettings.start_date + "T00:00:00");
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return selected > today;
+  }, [draftSettings.start_date]);
+
   // ─── STRIPE INVOICE PREVIEW ────────────────────────────
   const fetchStripePreview = async () => {
     if (!isValid || !selectedCustomer) return;
@@ -1426,7 +1434,8 @@ function CreateSubscriptionPage() {
       const payload = {
         action: "preview_invoice",
         customer_id: selectedCustomer.stripe_customer_id,
-        start_date: draftSettings.start_date || undefined,
+        start_date: isFutureStart ? draftSettings.start_date : undefined,
+        first_invoice: isFutureStart ? draftSettings.first_invoice : "immediate",
         items: aggregatedItems.map(agg => {
           const pr = getPrice(agg.price_id);
           return {
@@ -1441,7 +1450,7 @@ function CreateSubscriptionPage() {
       });
       const data = await resp.json();
       if (data.success && data.invoice_preview) {
-        setStripePreview(data.invoice_preview);
+        setStripePreview({ ...data.invoice_preview, scheduling: data.scheduling });
       } else {
         setStatusMsg({ type: "error", text: "Preview Stripe: " + (data.error || "errore sconosciuto") });
       }
@@ -1458,7 +1467,8 @@ function CreateSubscriptionPage() {
         stripe_customer_id: selectedCustomer.stripe_customer_id, status: "draft",
         collection_method: draftSettings.collection_method, days_until_due: draftSettings.days_until_due,
         billing_interval: detectedInterval, start_date: draftSettings.start_date || null,
-        tax_rate_id: draftSettings.tax_rate_id || null, notes: draftSettings.notes || null,
+        first_invoice: isFutureStart ? draftSettings.first_invoice : "immediate",
+        notes: draftSettings.notes || null,
       });
       for (const line of productLines) {
         if (!line.product_id || !line.price_id) continue;
@@ -1484,7 +1494,8 @@ function CreateSubscriptionPage() {
     customer_id: selectedCustomer.stripe_customer_id,
     collection_method: draftSettings.collection_method,
     days_until_due: draftSettings.days_until_due,
-    start_date: draftSettings.start_date || undefined,
+    start_date: isFutureStart ? draftSettings.start_date : undefined,
+    first_invoice: isFutureStart ? draftSettings.first_invoice : "immediate",
     items: aggregatedItems.map(agg => {
       const pr = getPrice(agg.price_id);
       return {
@@ -1825,11 +1836,51 @@ function CreateSubscriptionPage() {
       <div className="bg-white border border-gray-100 rounded-2xl p-5">
         <h3 className="text-sm font-bold text-gray-700 mb-4">Impostazioni Subscription</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <FormField label="Metodo"><select value={draftSettings.collection_method} onChange={e => setDraftSettings(p => ({ ...p, collection_method: e.target.value }))} className={selectCls}><option value="send_invoice">Invia Fattura</option><option value="charge_automatically">Addebito Auto</option></select></FormField>
-          <FormField label="GG Scadenza"><input type="number" min="0" value={draftSettings.days_until_due} onChange={e => setDraftSettings(p => ({ ...p, days_until_due: parseInt(e.target.value) || 30 }))} className={inputCls} /></FormField>
+          <FormField label="Metodo pagamento"><select value={draftSettings.collection_method} onChange={e => setDraftSettings(p => ({ ...p, collection_method: e.target.value }))} className={selectCls}><option value="send_invoice">Invia Fattura</option><option value="charge_automatically">Addebito Auto</option></select></FormField>
+          {draftSettings.collection_method === "send_invoice" && (
+            <FormField label="GG Scadenza fattura"><input type="number" min="1" max="365" value={draftSettings.days_until_due} onChange={e => setDraftSettings(p => ({ ...p, days_until_due: parseInt(e.target.value) || 30 }))} className={inputCls} /></FormField>
+          )}
           <FormField label="Billing" hint="auto da prezzi"><div className={`px-3 py-2 rounded-lg text-sm font-bold ${detectedInterval === "mixed" ? "bg-red-50 text-red-700 border border-red-200" : "bg-emerald-50 text-emerald-800 border border-emerald-200"}`}>{detectedInterval === "year" ? "Annuale" : detectedInterval === "month" ? "Mensile" : detectedInterval === "mixed" ? "⚠ Intervalli misti!" : detectedInterval}</div></FormField>
-          <FormField label="Data Inizio"><input type="date" value={draftSettings.start_date} onChange={e => setDraftSettings(p => ({ ...p, start_date: e.target.value }))} className={inputCls} /></FormField>
+          <FormField label="Data inizio fatturazione"><input type="date" value={draftSettings.start_date} onChange={e => { setDraftSettings(p => ({ ...p, start_date: e.target.value })); setStripePreview(null); }} className={inputCls} /><span className="text-[10px] text-gray-400 mt-0.5 block">{!draftSettings.start_date ? "Vuoto = oggi" : isFutureStart ? "⏱ Inizio futuro" : "✓ Oggi / passato"}</span></FormField>
         </div>
+        
+        {/* Future start: first invoice timing */}
+        {isFutureStart && (
+          <div className="mt-4 p-4 bg-indigo-50 border border-indigo-200 rounded-xl">
+            <h4 className="text-xs font-bold text-indigo-800 mb-3 flex items-center gap-1.5"><Clock size={13} /> Quando emettere la prima fattura?</h4>
+            <div className="space-y-2">
+              <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${draftSettings.first_invoice === "at_start" ? "bg-white border-indigo-400 shadow-sm" : "bg-indigo-50/50 border-indigo-100 hover:border-indigo-200"}`}>
+                <input type="radio" name="first_invoice" value="at_start" checked={draftSettings.first_invoice === "at_start"} onChange={() => { setDraftSettings(p => ({ ...p, first_invoice: "at_start" })); setStripePreview(null); }} className="mt-0.5" />
+                <div>
+                  <span className="text-sm font-bold text-gray-800">Alla data di inizio ({new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" })})</span>
+                  <p className="text-[11px] text-gray-500 mt-0.5">Nessun addebito fino alla data di inizio. La subscription viene creata subito ma la prima fattura parte il {new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT")}.</p>
+                  <p className="text-[10px] text-indigo-600 mt-0.5">Stripe: billing_cycle_anchor = {draftSettings.start_date}, proration_behavior = none</p>
+                </div>
+              </label>
+              <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${draftSettings.first_invoice === "prorata_now" ? "bg-white border-indigo-400 shadow-sm" : "bg-indigo-50/50 border-indigo-100 hover:border-indigo-200"}`}>
+                <input type="radio" name="first_invoice" value="prorata_now" checked={draftSettings.first_invoice === "prorata_now"} onChange={() => { setDraftSettings(p => ({ ...p, first_invoice: "prorata_now" })); setStripePreview(null); }} className="mt-0.5" />
+                <div>
+                  <span className="text-sm font-bold text-gray-800">Subito con prorata</span>
+                  <p className="text-[11px] text-gray-500 mt-0.5">Fattura immediata per il periodo da oggi al {new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT")} (prorata). Poi fattura piena alla data di inizio.</p>
+                  <p className="text-[10px] text-indigo-600 mt-0.5">Stripe: billing_cycle_anchor = {draftSettings.start_date}, proration_behavior = create_prorations</p>
+                </div>
+              </label>
+            </div>
+          </div>
+        )}
+        
+        {/* Summary box */}
+        <div className="mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+          <h5 className="text-[10px] font-bold text-gray-500 mb-1.5 uppercase tracking-wider">Riepilogo temporale</h5>
+          {!isFutureStart ? (
+            <p className="text-xs text-gray-700">📅 La subscription parte <strong>oggi</strong>. Prima fattura emessa <strong>immediatamente</strong>. Rinnovo {detectedInterval === "year" ? "annuale" : "mensile"} automatico.</p>
+          ) : draftSettings.first_invoice === "at_start" ? (
+            <p className="text-xs text-gray-700">📅 Subscription creata ora, nessun addebito fino al <strong>{new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })}</strong>. Prima fattura a quella data. Poi rinnovo {detectedInterval === "year" ? "annuale" : "mensile"}.</p>
+          ) : (
+            <p className="text-xs text-gray-700">📅 Fattura <strong>prorata immediata</strong> (da oggi al {new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT")}). Fattura piena il <strong>{new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })}</strong>. Poi rinnovo {detectedInterval === "year" ? "annuale" : "mensile"}.</p>
+          )}
+        </div>
+        
         <FormField label="Note"><input type="text" value={draftSettings.notes} onChange={e => setDraftSettings(p => ({ ...p, notes: e.target.value }))} className={inputCls + " mt-3"} placeholder="Note opzionali..." /></FormField>
       </div>
 
@@ -1865,47 +1916,69 @@ function CreateSubscriptionPage() {
               {previewLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {previewLoading ? "Caricamento..." : stripePreview ? "Aggiorna Preview" : "Carica Preview da Stripe"}
             </button>
           </div>
-          {!stripePreview && !previewLoading && <p className="text-[11px] text-indigo-600/70">Clicca il pulsante per generare un'anteprima reale della fattura da Stripe, con importi definitivi, IVA e data primo pagamento.</p>}
+          {!stripePreview && !previewLoading && <p className="text-[11px] text-indigo-600/70">Clicca il pulsante per generare un'anteprima reale della prima fattura da Stripe, con importi, IVA 22% e date esatte.</p>}
           {stripePreview && (<div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            {/* Scheduling mode badge */}
+            {stripePreview.scheduling && stripePreview.scheduling.mode !== "immediate" && (
+              <div className={`p-2 rounded-lg text-center text-xs font-bold ${stripePreview.scheduling.mode === "at_start" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-amber-100 text-amber-800 border border-amber-200"}`}>
+                {stripePreview.scheduling.mode === "at_start" 
+                  ? `📅 Questa preview mostra la fattura che verrà emessa il ${new Date(stripePreview.scheduling.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })} — nessun addebito prima di quella data`
+                  : `⚡ Questa preview mostra la fattura PRORATA che verrà emessa SUBITO — poi fattura piena il ${new Date(stripePreview.scheduling.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })}`
+                }
+              </div>
+            )}
+            
+            {/* Dates from Stripe */}
+            <div className="p-3 bg-white border border-indigo-200 rounded-lg">
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <span className="text-[10px] text-gray-500 block">📅 Emissione fattura</span>
+                  <span className="font-bold text-sm text-indigo-800">{stripePreview.scheduling?.mode === "at_start" && stripePreview.scheduling.start_date ? new Date(stripePreview.scheduling.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" }) : "Immediata (oggi)"}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-gray-500 block">📅 Periodo fatturato</span>
+                  <span className="font-bold text-sm text-gray-800">{stripePreview.lines?.[0]?.period_start ? new Date(stripePreview.lines[0].period_start * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"} → {stripePreview.lines?.[0]?.period_end ? new Date(stripePreview.lines[0].period_end * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-gray-500 block">🔄 Prossimo rinnovo</span>
+                  <span className="font-bold text-sm text-gray-800">{stripePreview.lines?.[0]?.period_end ? new Date(stripePreview.lines[0].period_end * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" }) : "—"}</span>
+                </div>
+              </div>
+              {stripePreview.lines?.some(l => l.proration) && (<p className="text-[10px] text-amber-700 mt-2 text-center font-bold">⚠ Questa fattura contiene righe prororate (periodo parziale)</p>)}
+            </div>
+
+            {/* Amounts */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="bg-white rounded-lg p-3 border border-indigo-100">
                 <span className="text-[10px] text-gray-500 block">Imponibile</span>
                 <span className="font-bold text-sm">{eur((stripePreview.subtotal || 0) / 100)}</span>
               </div>
               <div className="bg-white rounded-lg p-3 border border-indigo-100">
-                <span className="text-[10px] text-gray-500 block">IVA {stripePreview.total_tax_amounts?.[0]?.tax_rate?.percentage ? `(${stripePreview.total_tax_amounts[0].tax_rate.percentage}%)` : stripePreview.tax > 0 ? `(${Math.round(stripePreview.tax / stripePreview.subtotal * 100)}%)` : ""}</span>
+                <span className="text-[10px] text-gray-500 block">IVA (22%)</span>
                 <span className={`font-bold text-sm ${stripePreview.tax > 0 ? "text-orange-700" : "text-red-600"}`}>{stripePreview.tax > 0 ? eur(stripePreview.tax / 100) : "⚠ € 0,00"}</span>
-                {stripePreview.tax === 0 && <span className="text-[9px] text-red-500 block">Tax non calcolata</span>}
+                {stripePreview.tax === 0 && <span className="text-[9px] text-red-500 block">Tax non calcolata!</span>}
               </div>
               <div className="bg-white rounded-lg p-3 border border-emerald-200">
-                <span className="text-[10px] text-gray-500 block">Totale IVA incl.</span>
-                <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.total || 0) / 100)}</span>
+                <span className="text-[10px] text-gray-500 block">Totale fattura</span>
+                <span className="font-bold text-lg text-emerald-700">{eur((stripePreview.total || 0) / 100)}</span>
               </div>
               <div className="bg-white rounded-lg p-3 border border-emerald-200">
                 <span className="text-[10px] text-gray-500 block">Da incassare</span>
                 <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.amount_due || 0) / 100)}</span>
               </div>
-              <div className="bg-white rounded-lg p-3 border border-amber-200">
-                <span className="text-[10px] text-gray-500 block">Inizio periodo</span>
-                <span className="font-bold text-sm text-amber-700">{stripePreview.period_start ? new Date(stripePreview.period_start * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"}</span>
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-amber-200">
-                <span className="text-[10px] text-gray-500 block">Fine periodo</span>
-                <span className="font-bold text-sm text-amber-700">{stripePreview.period_end ? new Date(stripePreview.period_end * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "—"}</span>
-              </div>
             </div>
             {/* Stripe line items */}
             {stripePreview.lines && stripePreview.lines.length > 0 && (<div>
-              <h5 className="text-[10px] font-bold text-indigo-700 mb-1.5 mt-2">Righe fattura Stripe</h5>
+              <h5 className="text-[10px] font-bold text-indigo-700 mb-1.5 mt-2">Dettaglio righe fattura</h5>
               <table className="w-full text-[11px]"><thead><tr className="border-b border-indigo-100 bg-indigo-50/50">
                 <th className="text-left py-1.5 px-2">Descrizione</th>
                 <th className="text-right py-1.5 px-2">Qtà</th>
                 <th className="text-right py-1.5 px-2">Importo</th>
-                <th className="text-right py-1.5 px-2">IVA riga</th>
+                <th className="text-right py-1.5 px-2">IVA</th>
                 <th className="text-left py-1.5 px-2">Periodo</th>
               </tr></thead><tbody>{stripePreview.lines.map((line, i) => (
-                <tr key={i} className="border-b border-indigo-50">
-                  <td className="py-1.5 px-2">{line.description || "—"}</td>
+                <tr key={i} className={`border-b border-indigo-50 ${line.proration ? "bg-amber-50/50" : ""}`}>
+                  <td className="py-1.5 px-2">{line.description || "—"}{line.proration && <span className="text-[9px] text-amber-600 ml-1">(prorata)</span>}</td>
                   <td className="py-1.5 px-2 text-right">{line.quantity || 1}</td>
                   <td className="py-1.5 px-2 text-right font-bold">{eur((line.amount || 0) / 100)}</td>
                   <td className="py-1.5 px-2 text-right text-orange-700">{line.tax_amounts?.[0]?.amount ? eur(line.tax_amounts[0].amount / 100) : "—"}</td>
@@ -1914,8 +1987,8 @@ function CreateSubscriptionPage() {
               ))}</tbody></table>
             </div>)}
             {/* Tax status */}
-            {stripePreview.tax > 0 && (<p className="text-[10px] text-emerald-600 mt-2">✓ IVA 22% applicata (tax rate manuale)</p>)}
-            {stripePreview.tax === 0 && (<p className="text-[10px] text-red-600 mt-2 font-bold">⚠ IVA non calcolata — verificare tax rate sulla subscription</p>)}
+            {stripePreview.tax > 0 && (<p className="text-[10px] text-emerald-600 mt-2">✓ IVA 22% applicata (tax rate: txr_...KcD)</p>)}
+            {stripePreview.tax === 0 && (<p className="text-[10px] text-red-600 mt-2 font-bold">⚠ IVA non calcolata — verificare configurazione tax rate</p>)}
           </div>)}
         </div>
 
@@ -1975,7 +2048,8 @@ function CreateSubscriptionPage() {
       <div className="space-y-4">
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
           <p className="text-sm font-medium text-amber-900 flex items-center gap-2"><AlertTriangle size={16} /> Stai per creare una subscription reale in Stripe</p>
-          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) Stripe — Imponibile: <strong>{eur(totalAmount / 100)}</strong> / {detectedInterval === "year" ? "anno" : "mese"}.{stripePreview?.tax > 0 && ` IVA: ${eur(stripePreview.tax / 100)} — Totale: ${eur(stripePreview.total / 100)}`}</p>
+          <p className="text-xs text-amber-700 mt-2">Cliente: <strong>{selectedCustomer?.ragione_sociale}</strong> — {aggregatedItems.length} item(s) — Imponibile: <strong>{eur(totalAmount / 100)}</strong>/{detectedInterval === "year" ? "anno" : "mese"}{stripePreview?.tax > 0 ? ` — IVA: ${eur(stripePreview.tax / 100)} — Totale: ${eur(stripePreview.total / 100)}` : ""}</p>
+          <p className="text-xs text-amber-700 mt-1">{!isFutureStart ? "⚡ Fattura emessa immediatamente" : draftSettings.first_invoice === "at_start" ? `📅 Prima fattura il ${new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })} (nessun addebito fino ad allora)` : `⚡ Fattura prorata immediata, poi piena il ${new Date(draftSettings.start_date + "T00:00:00").toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" })}`}</p>
         </div>
         <div className="flex justify-end gap-3">
           <button onClick={() => setShowStripeConfirm(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
@@ -2006,7 +2080,7 @@ function DraftsPage() {
     return {
       mode, stripe_customer_id: draft.stripe_customer_id, collection_method: draft.collection_method || "send_invoice",
       days_until_due: draft.days_until_due || 30, billing_interval: draft.billing_interval || "year",
-      ...(mode === "stripe" ? { start_date: draft.start_date } : {}), tax_rate_id: draft.tax_rate_id,
+      ...(mode === "stripe" ? { start_date: draft.start_date, first_invoice: draft.first_invoice || "at_start" } : {}),
       items: Object.values(agg).map(li => ({ product_id: li.product_id, price_id: li.price_id, quantity: li.quantity, pricing_mode: li.pricing_mode, unit_amount: li.unit_amount, override_unit_amount: li.override_amount, coupon_id: null })),
       esercizio_detail: items.map(li => ({ esercizio_id: li.esercizio_id, product_id: li.product_id, price_id: li.price_id, quantity: li.quantity, pricing_mode: li.pricing_mode, unit_amount: li.unit_amount, override_unit_amount: li.override_amount, coupon_id: null })),
     };
