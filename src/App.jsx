@@ -965,6 +965,7 @@ function CreateSubscriptionPage() {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
   const [showQuickCreate, setShowQuickCreate] = useState(false);
+  const [showStripeConfirm, setShowStripeConfirm] = useState(false);
   const [bulkConfig, setBulkConfig] = useState({ product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: "" });
   const [esSearch, setEsSearch] = useState("");
 
@@ -973,7 +974,7 @@ function CreateSubscriptionPage() {
     if (!productsRaw) return [];
     const grouped = {};
     productsRaw.forEach(p => {
-      if (!p.recurring_interval) return;
+      if (!p.billing_interval) return;
       if (!grouped[p.stripe_product_id]) grouped[p.stripe_product_id] = { product_name: p.product_name, stripe_product_id: p.stripe_product_id, prices: [] };
       grouped[p.stripe_product_id].prices.push(p);
     });
@@ -1115,6 +1116,57 @@ function CreateSubscriptionPage() {
     finally { setSaving(false); }
   };
 
+  // CREATE DIRECTLY IN STRIPE
+  const handleCreateStripe = () => setShowStripeConfirm(true);
+
+  const buildStripePayload = () => ({
+    mode: "stripe",
+    stripe_customer_id: selectedCustomer.stripe_customer_id,
+    collection_method: draftSettings.collection_method,
+    days_until_due: draftSettings.days_until_due,
+    billing_interval: draftSettings.billing_interval,
+    start_date: draftSettings.start_date || undefined,
+    tax_rate_id: draftSettings.tax_rate_id || undefined,
+    items: aggregatedItems.map(agg => ({
+      product_id: agg.product_id,
+      price_id: agg.price_id,
+      quantity: agg.quantity,
+      pricing_mode: agg.pricing_mode,
+      unit_amount: agg.unit_amount,
+      override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
+      coupon_id: agg.coupon_id || undefined,
+    })),
+    esercizio_detail: selectedEsercizi.map(it => ({
+      esercizio_id: it.esercizio_id,
+      product_id: it.product_id,
+      price_id: it.price_id,
+      quantity: it.quantity || 1,
+      pricing_mode: it.pricing_mode,
+      unit_amount: getUnitAmount(it),
+      override_unit_amount: it.pricing_mode === "override" ? getUnitAmount(it) : undefined,
+      coupon_id: it.coupon_id || undefined,
+    })),
+  });
+
+  const executeStripeCreation = async () => {
+    setSaving(true); setStatusMsg(null); setShowStripeConfirm(false);
+    try {
+      const payload = buildStripePayload();
+      const resp = await fetch(N8N_BASE + "/sb-wf11-create-subscription", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (data.success !== false && !data.error) {
+        setStatusMsg({ type: "success", text: `Subscription creata in Stripe: ${data.subscription_id || "OK"}` });
+        setSelectedEsercizi([]); setStep(1); setSelectedCustomer(null);
+        reloadEsercizi();
+      } else {
+        setStatusMsg({ type: "error", text: "Errore Stripe: " + (data.message || data.error || JSON.stringify(data)) });
+      }
+    } catch (err) { setStatusMsg({ type: "error", text: "Errore: " + err.message }); }
+    finally { setSaving(false); }
+  };
+
   // QUICK CREATE ESERCIZIO (inline)
   const QuickCreateInline = () => {
     const [qf, setQf] = useState({ esercizio_id: "", nome_esercizio: "", citta: "", provincia: "" });
@@ -1241,8 +1293,8 @@ function CreateSubscriptionPage() {
     {step === 3 && (<div className="space-y-4">
       {/* BULK CONFIGURATOR */}
       <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-2xl p-5">
-        <h3 className="text-sm font-bold text-indigo-900 mb-1 flex items-center gap-2"><Copy size={16} /> Configurazione Bulk</h3>
-        <p className="text-xs text-indigo-600 mb-4">Imposta e applica a tutti i {selectedEsercizi.length} esercizi in un click</p>
+        <h3 className="text-sm font-bold text-indigo-900 mb-1 flex items-center gap-2"><Copy size={16} /> Configurazione Bulk — Applica a Tutti</h3>
+        <p className="text-xs text-indigo-600 mb-4">Seleziona prodotto, prezzo e opzioni qui, poi clicca "Applica" per copiarli su tutti i {selectedEsercizi.length} esercizi. Puoi poi personalizzare singoli esercizi nella sezione sotto.</p>
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
           <FormField label="Prodotto">
             <select value={bulkConfig.product_id} onChange={e => setBulkConfig(p => ({ ...p, product_id: e.target.value, price_id: "" }))} className={selectCls + " text-xs"}>
@@ -1254,7 +1306,7 @@ function CreateSubscriptionPage() {
             <select value={bulkConfig.price_id} onChange={e => setBulkConfig(p => ({ ...p, price_id: e.target.value }))} className={selectCls + " text-xs"}>
               <option value="">Seleziona...</option>
               {bulkConfig.product_id && products.find(p => p.stripe_product_id === bulkConfig.product_id)?.prices.map(pr => (
-                <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.recurring_interval}{pr.price_active ? "" : " ⚠"}</option>
+                <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)} / {pr.billing_interval}{pr.price_active ? "" : " ⚠"}</option>
               ))}
             </select>
           </FormField>
@@ -1282,8 +1334,10 @@ function CreateSubscriptionPage() {
       {/* PER-ESERCIZIO CONFIG */}
       <div className="bg-white border border-gray-100 rounded-2xl p-5">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-bold text-gray-700">{selectedEsercizi.length} Esercizi — Configurazione Singola</h3>
-          <p className="text-xs text-gray-400">Puoi personalizzare ogni esercizio singolarmente</p>
+          <div>
+            <h3 className="text-sm font-bold text-gray-700">{selectedEsercizi.length} Esercizi — Personalizzazione Singola</h3>
+            <p className="text-xs text-gray-400">Se hai usato il Bulk, qui sotto puoi modificare eccezioni specifiche per singolo esercizio</p>
+          </div>
         </div>
         <div className="space-y-2 max-h-[50vh] overflow-y-auto">
           {selectedEsercizi.map((it, idx) => {
@@ -1307,7 +1361,7 @@ function CreateSubscriptionPage() {
                 <select value={it.price_id} onChange={e => updateEsConfig(it.esercizio_id, "price_id", e.target.value)} className={selectCls + " text-[11px] py-1.5"}>
                   <option value="">Prezzo *</option>
                   {it.product_id && products.find(p => p.stripe_product_id === it.product_id)?.prices.map(pr => (
-                    <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)}/{pr.recurring_interval}</option>
+                    <option key={pr.stripe_price_id} value={pr.stripe_price_id}>{eur(pr.unit_amount / 100)}/{pr.billing_interval}</option>
                   ))}
                 </select>
                 <input type="number" min="1" value={it.quantity} onChange={e => updateEsConfig(it.esercizio_id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-[11px] py-1.5"} placeholder="Qtà" />
@@ -1403,9 +1457,24 @@ function CreateSubscriptionPage() {
         <button onClick={() => setStep(3)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">← Modifica</button>
         <div className="flex gap-3">
           <button onClick={handleSaveDraft} disabled={saving} className="px-6 py-3 bg-amber-500 text-white text-sm font-bold rounded-xl hover:bg-amber-600 disabled:opacity-50 flex items-center gap-2">{saving ? <Loader2 size={16} className="animate-spin" /> : <FileCheck size={16} />} Salva come Draft</button>
+          <button onClick={handleCreateStripe} disabled={saving} className="px-6 py-3 bg-emerald-600 text-white text-sm font-bold rounded-xl hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 shadow-lg">{saving ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Crea in Stripe</button>
         </div>
       </div>
     </div>)}
+
+    {/* CONFIRM STRIPE CREATION MODAL */}
+    <Modal open={showStripeConfirm} onClose={() => setShowStripeConfirm(false)} title="Conferma Creazione Subscription">
+      <div className="space-y-4">
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
+          <p className="text-sm font-medium text-amber-900 flex items-center gap-2"><AlertTriangle size={16} /> Stai per creare una subscription reale in Stripe</p>
+          <p className="text-xs text-amber-700 mt-2">Questa azione creerà immediatamente la subscription per <strong>{selectedCustomer?.ragione_sociale}</strong> con {aggregatedItems.length} item(s) per un totale di <strong>{eur(totalAmount / 100)}</strong> / {draftSettings.billing_interval}.</p>
+        </div>
+        <div className="flex justify-end gap-3">
+          <button onClick={() => setShowStripeConfirm(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
+          <button onClick={executeStripeCreation} disabled={saving} className="px-6 py-2 text-sm font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2">{saving ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Conferma e Crea</button>
+        </div>
+      </div>
+    </Modal>
   </div>);
 }
 
@@ -1599,7 +1668,7 @@ function ProductsPage() {
   const csvColumns = [
     { label: "Prodotto", accessor: r => r.product_name }, { label: "Product ID", accessor: r => r.stripe_product_id },
     { label: "Price ID", accessor: r => r.stripe_price_id }, { label: "Importo €", accessor: r => (r.unit_amount || 0) / 100 },
-    { label: "Intervallo", accessor: r => r.recurring_interval }, { label: "Attivo", accessor: r => r.price_active ? "Sì" : "No" },
+    { label: "Intervallo", accessor: r => r.billing_interval }, { label: "Attivo", accessor: r => r.price_active ? "Sì" : "No" },
   ];
   return (<div className="space-y-5">
     <div className="flex items-center justify-between"><div><h1 className="text-2xl font-bold text-gray-900">Prodotti e Prezzi</h1><p className="text-sm text-gray-500 mt-0.5">{data?.length || 0} prezzi</p></div>
@@ -1608,7 +1677,7 @@ function ProductsPage() {
     <div className="bg-white border border-gray-100 rounded-2xl overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b border-gray-100 bg-gray-50/50">
       <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Prodotto</th><th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Price ID</th><th className="text-right py-3 px-4 text-xs font-semibold text-gray-500">Importo</th><th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Intervallo</th><th className="text-center py-3 px-4 text-xs font-semibold text-gray-500">Attivo</th>
     </tr></thead><tbody>{(data || []).map((p, i) => (<tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50">
-      <td className="py-3 px-4 font-medium text-gray-900">{p.product_name}</td><td className="py-3 px-4 font-mono text-xs text-gray-500">{p.stripe_price_id}</td><td className="py-3 px-4 text-right font-bold">{eur((p.unit_amount || 0) / 100)}</td><td className="py-3 px-4">{p.recurring_interval || "—"}</td><td className="py-3 px-4 text-center">{p.price_active ? <CheckCircle size={14} className="text-emerald-500 inline" /> : <XCircle size={14} className="text-gray-300 inline" />}</td>
+      <td className="py-3 px-4 font-medium text-gray-900">{p.product_name}</td><td className="py-3 px-4 font-mono text-xs text-gray-500">{p.stripe_price_id}</td><td className="py-3 px-4 text-right font-bold">{eur((p.unit_amount || 0) / 100)}</td><td className="py-3 px-4">{p.billing_interval || "—"}</td><td className="py-3 px-4 text-center">{p.price_active ? <CheckCircle size={14} className="text-emerald-500 inline" /> : <XCircle size={14} className="text-gray-300 inline" />}</td>
     </tr>))}</tbody></table></div></div>
   </div>);
 }
