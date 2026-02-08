@@ -749,6 +749,7 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [syncStripe, setSyncStripe] = useState(true);
 
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -756,7 +757,30 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
     setSaving(true); setError(null);
     try {
       await sbPatch("customers", `stripe_customer_id=eq.${customer.stripe_customer_id}`, { ...form, updated_at: new Date().toISOString() });
-      onSuccess({ type: "success", text: `Cliente ${form.ragione_sociale} aggiornato` });
+      // Sync to Stripe if enabled
+      if (syncStripe && customer.stripe_customer_id) {
+        try {
+          const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "update_customer", customer_id: customer.stripe_customer_id,
+              name: form.ragione_sociale, email: form.email, phone: form.phone,
+              address: { line1: form.indirizzo_via, city: form.indirizzo_citta, postal_code: form.indirizzo_cap, state: form.indirizzo_provincia, country: form.indirizzo_paese },
+              metadata: { partita_iva: form.partita_iva, codice_fiscale: form.codice_fiscale, codice_sdi: form.codice_sdi, pec: form.pec },
+            }),
+          });
+          const data = await resp.json();
+          if (data.success) {
+            onSuccess({ type: "success", text: `${form.ragione_sociale} aggiornato (Supabase + Stripe ✓)` });
+          } else {
+            onSuccess({ type: "success", text: `${form.ragione_sociale} aggiornato in Supabase. Stripe sync fallito: ${data.error}` });
+          }
+        } catch (stripeErr) {
+          onSuccess({ type: "success", text: `${form.ragione_sociale} aggiornato in Supabase. Stripe sync errore: ${stripeErr.message}` });
+        }
+      } else {
+        onSuccess({ type: "success", text: `Cliente ${form.ragione_sociale} aggiornato` });
+      }
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   };
@@ -778,9 +802,189 @@ function EditCustomerModal({ customer, onClose, onSuccess }) {
       <FormField label="CAP"><input type="text" value={form.indirizzo_cap} onChange={e => set("indirizzo_cap", e.target.value)} className={inputCls} maxLength={5} /></FormField>
       <FormField label="Provincia"><input type="text" value={form.indirizzo_provincia} onChange={e => set("indirizzo_provincia", e.target.value)} className={inputCls} maxLength={2} /></FormField>
     </div>
-    <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-gray-100">
-      <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
-      <button onClick={handleSave} disabled={saving} className="px-6 py-2 text-sm font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">{saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Salva</button>
+    <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-100">
+      <label className="flex items-center gap-2 text-xs cursor-pointer">
+        <input type="checkbox" checked={syncStripe} onChange={e => setSyncStripe(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
+        <span className="text-gray-600">Sincronizza modifiche su Stripe</span>
+        {syncStripe && <span className="text-[10px] text-indigo-500 font-medium">name, email, phone, address, metadata</span>}
+      </label>
+      <div className="flex gap-3">
+        <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Annulla</button>
+        <button onClick={handleSave} disabled={saving} className="px-6 py-2 text-sm font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">{saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} {syncStripe ? "Salva + Sync Stripe" : "Salva"}</button>
+      </div>
+    </div>
+  </Modal>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MANAGE SUBSCRIPTION MODAL (upgrade/downgrade/cancel via WF12)
+// ═══════════════════════════════════════════════════════════════
+function ManageSubscriptionModal({ subscriptionId, customerName, onClose, onSuccess }) {
+  const [subData, setSubData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+  const [previewData, setPreviewData] = useState(null);
+  const [cancelMode, setCancelMode] = useState(null); // null | "end_of_period" | "immediately"
+  const [itemChanges, setItemChanges] = useState([]); // [{si_id, quantity, action: "update"|"remove"}]
+
+  // Load subscription from Stripe
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "get_subscription", subscription_id: subscriptionId }),
+        });
+        const data = await resp.json();
+        if (data.success && data.subscription) {
+          setSubData(data.subscription);
+          setItemChanges(data.subscription.items.map(it => ({ si_id: it.id, price_id: it.price_id, product_name: it.product_name || it.description || it.price_id, quantity: it.quantity, unit_amount: it.unit_amount, action: "keep" })));
+        } else { setStatusMsg({ type: "error", text: "Errore caricamento: " + (data.error || "sconosciuto") }); }
+      } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
+      finally { setLoading(false); }
+    })();
+  }, [subscriptionId]);
+
+  const hasChanges = itemChanges.some(ic => ic.action !== "keep" || ic.quantity !== (subData?.items?.find(it => it.id === ic.si_id)?.quantity));
+
+  const updateItemQty = (si_id, delta) => setItemChanges(prev => prev.map(ic => ic.si_id === si_id ? { ...ic, quantity: Math.max(1, ic.quantity + delta) } : ic));
+  const markRemove = (si_id) => setItemChanges(prev => prev.map(ic => ic.si_id === si_id ? { ...ic, action: ic.action === "remove" ? "keep" : "remove" } : ic));
+
+  // Preview changes
+  const handlePreview = async () => {
+    setSaving(true); setPreviewData(null); setStatusMsg(null);
+    try {
+      const items = itemChanges.filter(ic => ic.action !== "remove").map(ic => ({
+        id: ic.si_id, quantity: ic.quantity, price: ic.price_id,
+      }));
+      const deleted_items = itemChanges.filter(ic => ic.action === "remove").map(ic => ({ id: ic.si_id, deleted: true }));
+      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "preview_update", subscription_id: subscriptionId, items: [...items, ...deleted_items], proration_behavior: "create_prorations" }),
+      });
+      const data = await resp.json();
+      if (data.success) { setPreviewData(data.invoice_preview); }
+      else { setStatusMsg({ type: "error", text: "Preview: " + (data.error || "errore") }); }
+    } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
+    finally { setSaving(false); }
+  };
+
+  // Apply changes
+  const handleApplyChanges = async () => {
+    setSaving(true); setStatusMsg(null);
+    try {
+      const items = itemChanges.filter(ic => ic.action !== "remove").map(ic => ({
+        id: ic.si_id, quantity: ic.quantity, price: ic.price_id,
+      }));
+      const deleted_items = itemChanges.filter(ic => ic.action === "remove").map(ic => ({ id: ic.si_id, deleted: true }));
+      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "update_subscription", subscription_id: subscriptionId, items: [...items, ...deleted_items], proration_behavior: "create_prorations" }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setStatusMsg({ type: "success", text: "Subscription aggiornata con successo" });
+        // Update esercizio_subscription table for removed items
+        for (const ic of itemChanges.filter(i => i.action === "remove")) {
+          try { await sbPatch("esercizio_subscription", `stripe_item_id=eq.${ic.si_id}`, { status: "removed", updated_at: new Date().toISOString() }); } catch (e) { console.warn("esercizio_subscription cleanup:", e.message); }
+        }
+        setTimeout(() => { onSuccess?.(); onClose(); }, 1500);
+      } else { setStatusMsg({ type: "error", text: "Errore: " + (data.error || "sconosciuto") }); }
+    } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
+    finally { setSaving(false); }
+  };
+
+  // Cancel subscription
+  const handleCancel = async () => {
+    if (!cancelMode) return;
+    setSaving(true); setStatusMsg(null);
+    try {
+      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "cancel_subscription", subscription_id: subscriptionId, cancel_at_period_end: cancelMode === "end_of_period" }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setStatusMsg({ type: "success", text: cancelMode === "end_of_period" ? "Cancellazione programmata a fine periodo" : "Subscription cancellata immediatamente" });
+        setTimeout(() => { onSuccess?.(); onClose(); }, 1500);
+      } else { setStatusMsg({ type: "error", text: "Errore: " + (data.error || "sconosciuto") }); }
+    } catch (err) { setStatusMsg({ type: "error", text: err.message }); }
+    finally { setSaving(false); }
+  };
+
+  return (<Modal open={true} onClose={onClose} title={`Gestione Subscription`}>
+    <div className="space-y-4 max-h-[70vh] overflow-y-auto">
+      <p className="text-xs text-gray-500">{customerName} — <span className="font-mono">{subscriptionId}</span></p>
+      {statusMsg && <div className={`p-3 rounded-lg text-xs font-medium ${statusMsg.type === "error" ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700"}`}>{statusMsg.text}</div>}
+      {loading ? <div className="flex justify-center py-8"><Loader2 size={24} className="animate-spin text-indigo-500" /></div> : subData ? (<>
+        {/* CURRENT STATUS */}
+        <div className="grid grid-cols-4 gap-3 text-xs">
+          <div className="bg-gray-50 rounded-lg p-3"><span className="text-gray-500 block">Status</span><span className={`font-bold ${subData.status === "active" ? "text-emerald-600" : subData.status === "past_due" ? "text-red-600" : "text-gray-600"}`}>{subData.status}</span></div>
+          <div className="bg-gray-50 rounded-lg p-3"><span className="text-gray-500 block">Billing</span><span className="font-bold">{subData.billing_interval || "—"}</span></div>
+          <div className="bg-gray-50 rounded-lg p-3"><span className="text-gray-500 block">Prossimo rinnovo</span><span className="font-bold">{subData.current_period_end ? new Date(subData.current_period_end * 1000).toLocaleDateString("it-IT") : "—"}</span></div>
+          <div className="bg-gray-50 rounded-lg p-3"><span className="text-gray-500 block">Collection</span><span className="font-bold">{subData.collection_method === "send_invoice" ? "Fattura" : "Auto"}</span></div>
+        </div>
+
+        {/* ITEMS TABLE */}
+        <div>
+          <h4 className="text-xs font-bold text-gray-700 mb-2">Items ({itemChanges.length})</h4>
+          <table className="w-full text-xs"><thead><tr className="border-b bg-gray-50">
+            <th className="text-left py-2 px-3">Prodotto</th>
+            <th className="text-right py-2 px-3">Unitario</th>
+            <th className="text-center py-2 px-3">Qtà</th>
+            <th className="text-right py-2 px-3">Subtotale</th>
+            <th className="py-2 px-3"></th>
+          </tr></thead><tbody>{itemChanges.map((ic) => {
+            const orig = subData.items.find(it => it.id === ic.si_id);
+            const changed = ic.quantity !== orig?.quantity;
+            const removed = ic.action === "remove";
+            return (<tr key={ic.si_id} className={`border-b border-gray-50 ${removed ? "opacity-40 line-through bg-red-50/30" : changed ? "bg-amber-50/30" : ""}`}>
+              <td className="py-2 px-3 font-medium">{ic.product_name}</td>
+              <td className="py-2 px-3 text-right">{eur((ic.unit_amount || 0) / 100)}</td>
+              <td className="py-2 px-3 text-center">
+                <div className="flex items-center justify-center gap-1">
+                  <button onClick={() => updateItemQty(ic.si_id, -1)} disabled={removed} className="w-5 h-5 rounded bg-gray-200 hover:bg-gray-300 text-xs font-bold disabled:opacity-30">−</button>
+                  <span className={`w-8 text-center font-bold ${changed ? "text-amber-700" : ""}`}>{ic.quantity}{changed && <span className="text-[9px] text-gray-400 ml-0.5">(da {orig?.quantity})</span>}</span>
+                  <button onClick={() => updateItemQty(ic.si_id, 1)} disabled={removed} className="w-5 h-5 rounded bg-gray-200 hover:bg-gray-300 text-xs font-bold disabled:opacity-30">+</button>
+                </div>
+              </td>
+              <td className="py-2 px-3 text-right font-bold">{eur((ic.unit_amount || 0) * ic.quantity / 100)}</td>
+              <td className="py-2 px-3 text-center"><button onClick={() => markRemove(ic.si_id)} className={`text-[10px] px-2 py-0.5 rounded ${removed ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700 hover:bg-red-200"}`}>{removed ? "Ripristina" : "Rimuovi"}</button></td>
+            </tr>);
+          })}</tbody></table>
+        </div>
+
+        {/* PREVIEW RESULT */}
+        {previewData && (<div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-xs">
+          <h5 className="font-bold text-indigo-800 mb-2">Preview modifiche (prorazione)</h5>
+          <div className="grid grid-cols-3 gap-3 mb-2">
+            <div><span className="text-gray-500">Subtotale</span><br /><strong>{eur((previewData.subtotal || 0) / 100)}</strong></div>
+            <div><span className="text-gray-500">Tasse</span><br /><strong>{eur((previewData.tax || 0) / 100)}</strong></div>
+            <div><span className="text-gray-500">Totale</span><br /><strong className="text-emerald-700">{eur((previewData.total || 0) / 100)}</strong></div>
+          </div>
+          {previewData.lines?.length > 0 && previewData.lines.map((ln, i) => <p key={i} className="text-[10px] text-gray-600">{ln.description}: {eur((ln.amount || 0) / 100)}</p>)}
+        </div>)}
+
+        {/* ACTION BUTTONS */}
+        {hasChanges && (<div className="flex gap-2">
+          <button onClick={handlePreview} disabled={saving} className="flex-1 px-4 py-2 text-xs font-bold bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 disabled:opacity-40 flex items-center justify-center gap-1">{saving ? <Loader2 size={12} className="animate-spin" /> : <Eye size={12} />} Preview Prorazione</button>
+          <button onClick={handleApplyChanges} disabled={saving} className="flex-1 px-4 py-2 text-xs font-bold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-40 flex items-center justify-center gap-1">{saving ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Applica Modifiche</button>
+        </div>)}
+
+        {/* CANCEL SECTION */}
+        <details className="mt-2">
+          <summary className="text-xs font-bold text-red-600 cursor-pointer hover:text-red-800">Cancella Subscription</summary>
+          <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-xl space-y-2">
+            <div className="flex gap-3">
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer"><input type="radio" name="cancelMode" checked={cancelMode === "end_of_period"} onChange={() => setCancelMode("end_of_period")} className="accent-red-500" /> A fine periodo{subData.current_period_end ? ` (${new Date(subData.current_period_end * 1000).toLocaleDateString("it-IT")})` : ""}</label>
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer"><input type="radio" name="cancelMode" checked={cancelMode === "immediately"} onChange={() => setCancelMode("immediately")} className="accent-red-500" /> Immediatamente</label>
+            </div>
+            {cancelMode && <button onClick={handleCancel} disabled={saving} className="px-4 py-2 text-xs font-bold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 flex items-center gap-1">{saving ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />} Conferma Cancellazione</button>}
+          </div>
+        </details>
+      </>) : <p className="text-xs text-gray-400 py-4 text-center">Nessun dato disponibile</p>}
     </div>
   </Modal>);
 }
@@ -793,6 +997,7 @@ function SubscriptionsPage() {
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({ status: ["active"] });
   const [page, setPage] = useState(0);
+  const [manageSub, setManageSub] = useState(null); // {id, customerName}
   useEffect(() => { setPage(0); }, [search, filters]);
   if (loading) return <Spinner />;
 
@@ -847,6 +1052,7 @@ function SubscriptionsPage() {
         <th className="text-center py-3 px-4 text-xs font-semibold text-gray-500">Items</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Periodo</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Metodo</th>
+        <th className="text-center py-3 px-4 text-xs font-semibold text-gray-500 w-20">Azioni</th>
       </tr></thead><tbody>{pageData.map((s, i) => {
         const dead = s.status === "canceled";
         return (<tr key={i} className={`border-b border-gray-50 ${dead ? "bg-gray-50/80 opacity-60" : s.status === "past_due" ? "bg-red-50/30" : "hover:bg-indigo-50/30"}`}>
@@ -857,10 +1063,12 @@ function SubscriptionsPage() {
           <td className="py-3 px-4 text-center text-xs">{s.items_count || "—"}</td>
           <td className="py-3 px-4 text-xs text-gray-500">{dead ? (<span className="text-red-500">End {fmtDate(s.canceled_at)}</span>) : (<>{fmtDate(s.current_period_start)} — {fmtDate(s.current_period_end)}</>)}</td>
           <td className="py-3 px-4 text-xs text-gray-500">{s.collection_method === "send_invoice" ? "Fattura" : s.collection_method === "charge_automatically" ? "Auto" : s.collection_method || "—"}</td>
+          <td className="py-3 px-4 text-center">{!dead && <button onClick={() => setManageSub({ id: s.stripe_subscription_id, customerName: s.ragione_sociale })} className="px-2.5 py-1 text-[10px] font-bold bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200">Gestisci</button>}</td>
         </tr>);
       })}</tbody></table></div>
       <Pagination page={page} totalPages={totalPages} total={filtered.length} onPageChange={setPage} />
     </div>
+    {manageSub && <ManageSubscriptionModal subscriptionId={manageSub.id} customerName={manageSub.customerName} onClose={() => setManageSub(null)} onSuccess={reload} />}
   </div>);
 }
 
@@ -872,7 +1080,72 @@ function InvoicesPage() {
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({});
   const [page, setPage] = useState(0);
+  const [pdfLoading, setPdfLoading] = useState(null);
   useEffect(() => { setPage(0); }, [search, filters]);
+
+  // Generate detailed PDF with esercizio breakdown
+  const generatePDF = async (inv) => {
+    setPdfLoading(inv.stripe_invoice_id);
+    try {
+      // Fetch esercizio details for this subscription
+      let esDetails = [];
+      if (inv.stripe_subscription_id) {
+        const esResp = await fetch(`${SB_URL}/rest/v1/esercizio_subscription?stripe_subscription_id=eq.${inv.stripe_subscription_id}&select=*,esercizi(esercizio_id,nome_esercizio,indirizzo_via,indirizzo_citta,indirizzo_cap,indirizzo_provincia)`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+        if (esResp.ok) esDetails = await esResp.json();
+      }
+      // Fetch line items via products for price names
+      let products = [];
+      try {
+        const pResp = await fetch(`${SB_URL}/rest/v1/v_products_with_prices?select=product_id,product_name,price_id,price_nickname,unit_amount`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+        if (pResp.ok) products = await pResp.json();
+      } catch (_) {}
+      const getProductName = (pid) => products.find(p => p.product_id === pid)?.product_name || pid || "—";
+      const getPriceName = (prid) => { const p = products.find(p => p.price_id === prid); return p ? (p.price_nickname || eur(p.unit_amount / 100)) : prid || "—"; };
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Dettaglio Fattura ${inv.invoice_number || inv.stripe_invoice_id}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;margin:40px;color:#1a1a1a;font-size:13px}
+h1{font-size:20px;margin-bottom:4px}h2{font-size:15px;color:#555;margin:24px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
+.meta{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0;background:#f9f9f9;padding:16px;border-radius:8px}
+.meta div{font-size:12px}.meta span{display:block;color:#888;font-size:10px;text-transform:uppercase}
+.meta strong{font-size:14px}table{width:100%;border-collapse:collapse;margin:8px 0}
+th{background:#f1f5f9;text-align:left;padding:8px 12px;font-size:11px;color:#555;border-bottom:2px solid #e2e8f0}
+td{padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:12px}.text-right{text-align:right}
+.font-bold{font-weight:700}.totals{margin-top:16px;text-align:right;font-size:14px}
+.totals div{margin:4px 0}.print-btn{position:fixed;top:16px;right:16px;background:#4f46e5;color:#fff;border:none;padding:10px 24px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px}
+@media print{.print-btn{display:none}}</style></head><body>
+<button class="print-btn" onclick="window.print()">🖨 Stampa / Salva PDF</button>
+<h1>Fattura ${inv.invoice_number || "—"}</h1>
+<p style="color:#888;font-size:11px">${inv.stripe_invoice_id}</p>
+<div class="meta">
+  <div><span>Cliente</span><strong>${inv.customer_name || "—"}</strong></div>
+  <div><span>Email</span><strong>${inv.customer_email || "—"}</strong></div>
+  <div><span>Status</span><strong>${inv.status}</strong></div>
+  <div><span>Data Fattura</span><strong>${inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString("it-IT") : "—"}</strong></div>
+  <div><span>Scadenza</span><strong>${inv.due_date ? new Date(inv.due_date).toLocaleDateString("it-IT") : "—"}</strong></div>
+  <div><span>Metodo</span><strong>${inv.collection_method === "send_invoice" ? "Fattura" : "Auto-charge"}</strong></div>
+  <div><span>Subtotale</span><strong>€ ${(inv.subtotal_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
+  <div><span>IVA</span><strong>€ ${(inv.tax_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
+  <div><span>Totale</span><strong style="font-size:18px;color:#059669">€ ${(inv.total_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
+  <div><span>Pagato</span><strong>€ ${(inv.amount_paid_eur || 0).toFixed(2).replace(".", ",")}</strong></div>
+</div>
+${esDetails.length > 0 ? `<h2>Dettaglio per Esercizio (${esDetails.length})</h2>
+<table><thead><tr><th>Esercizio</th><th>ID</th><th>Indirizzo</th><th>Città</th><th>Prodotto</th><th>Prezzo</th><th class="text-right">Utenze</th></tr></thead>
+<tbody>${esDetails.map(es => {
+  const e = es.esercizi || {};
+  return `<tr><td class="font-bold">${e.nome_esercizio || "—"}</td><td style="font-family:monospace;font-size:11px">${e.esercizio_id || es.esercizio_id || "—"}</td>
+<td>${e.indirizzo_via || "—"}</td><td>${e.indirizzo_citta || "—"} ${e.indirizzo_cap || ""} ${e.indirizzo_provincia || ""}</td>
+<td>${getProductName(es.product_id)}</td><td>${getPriceName(es.price_id)}</td><td class="text-right font-bold">${es.utenze_count || 1}</td></tr>`;
+}).join("")}</tbody></table>` : `<h2>Dettaglio Esercizi</h2><p style="color:#888">Nessun mapping esercizio trovato per questa subscription.</p>`}
+<div class="totals"><div>Subscription: <span style="font-family:monospace">${inv.stripe_subscription_id || "—"}</span></div></div>
+<p style="margin-top:32px;color:#aaa;font-size:10px">Generato il ${new Date().toLocaleString("it-IT")} — Biorsaf Finance Hub</p>
+</body></html>`;
+      const w = window.open("", "_blank");
+      w.document.write(html);
+      w.document.close();
+    } catch (err) { console.error("PDF generation error:", err); }
+    finally { setPdfLoading(null); }
+  };
+
   if (loading) return <Spinner />;
 
   const statusCounts = {};
@@ -930,6 +1203,7 @@ function InvoicesPage() {
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Scadenza</th>
         <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500">Metodo</th>
         <th className="text-center py-3 px-4 text-xs font-semibold text-gray-500">Link</th>
+        <th className="text-center py-3 px-4 text-xs font-semibold text-gray-500">PDF</th>
       </tr></thead><tbody>{pageData.map((inv, i) => {
         const overdue = inv.status === "open" && inv.due_date && new Date(inv.due_date) < new Date();
         return (<tr key={i} className={`border-b border-gray-50 ${overdue ? "bg-red-50/50" : inv.status === "void" ? "opacity-50" : "hover:bg-gray-50/50"}`}>
@@ -941,6 +1215,7 @@ function InvoicesPage() {
           <td className={`py-3 px-4 ${overdue ? "text-red-600 font-bold" : ""}`}>{fmtDate(inv.due_date)}</td>
           <td className="py-3 px-4 text-xs text-gray-500">{inv.collection_method === "send_invoice" ? "Fattura" : inv.collection_method === "charge_automatically" ? "Auto" : "—"}</td>
           <td className="py-3 px-4 text-center">{inv.hosted_invoice_url && <a href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700"><ExternalLink size={14} /></a>}</td>
+          <td className="py-3 px-4 text-center"><button onClick={() => generatePDF(inv)} disabled={pdfLoading === inv.stripe_invoice_id} className="text-indigo-500 hover:text-indigo-700 disabled:opacity-40">{pdfLoading === inv.stripe_invoice_id ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}</button></td>
         </tr>);
       })}</tbody></table></div>
       <Pagination page={page} totalPages={totalPages} total={filtered.length} onPageChange={setPage} />
@@ -968,6 +1243,8 @@ function CreateSubscriptionPage() {
   const [statusMsg, setStatusMsg] = useState(null);
   const [showQuickCreate, setShowQuickCreate] = useState(false);
   const [showStripeConfirm, setShowStripeConfirm] = useState(false);
+  const [stripePreview, setStripePreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [bulkConfig, setBulkConfig] = useState({ product_id: "", price_id: "", quantity: 1, pricing_mode: "standard", override_amount: "", coupon_id: "" });
   const [esSearch, setEsSearch] = useState("");
   const lineIdRef = useRef(0);
@@ -1095,6 +1372,34 @@ function CreateSubscriptionPage() {
   const incompleteLines = productLines.filter(l => !l.product_id || !l.price_id);
   const isValid = selectedEsercizi.length > 0 && eserciziWithoutLines.length === 0 && incompleteLines.length === 0 && productLines.length > 0;
 
+  // ─── STRIPE INVOICE PREVIEW ────────────────────────────
+  const fetchStripePreview = async () => {
+    if (!isValid || !selectedCustomer) return;
+    setPreviewLoading(true); setStripePreview(null);
+    try {
+      const payload = {
+        action: "preview_invoice",
+        customer_id: selectedCustomer.stripe_customer_id,
+        collection_method: draftSettings.collection_method,
+        items: aggregatedItems.map(agg => ({
+          product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
+          pricing_mode: agg.pricing_mode, billing_interval: draftSettings.billing_interval,
+          override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
+        })),
+      };
+      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (data.success && data.invoice_preview) {
+        setStripePreview(data.invoice_preview);
+      } else {
+        setStatusMsg({ type: "error", text: "Preview Stripe: " + (data.error || "errore sconosciuto") });
+      }
+    } catch (err) { setStatusMsg({ type: "error", text: "Preview Stripe: " + err.message }); }
+    finally { setPreviewLoading(false); }
+  };
+
   // ─── SAVE DRAFT ──────────────────────────────────────────
   const handleSaveDraft = async () => {
     if (!isValid || !selectedCustomer) return;
@@ -1126,25 +1431,21 @@ function CreateSubscriptionPage() {
   const handleCreateStripe = () => setShowStripeConfirm(true);
 
   const buildStripePayload = () => ({
-    mode: "stripe",
-    stripe_customer_id: selectedCustomer.stripe_customer_id,
+    action: "create_subscription",
+    customer_id: selectedCustomer.stripe_customer_id,
     collection_method: draftSettings.collection_method,
     days_until_due: draftSettings.days_until_due,
     billing_interval: draftSettings.billing_interval,
     start_date: draftSettings.start_date || undefined,
-    tax_rate_id: draftSettings.tax_rate_id || undefined,
     items: aggregatedItems.map(agg => ({
       product_id: agg.product_id, price_id: agg.price_id, quantity: agg.quantity,
-      pricing_mode: agg.pricing_mode, unit_amount: agg.unit_amount,
+      pricing_mode: agg.pricing_mode, billing_interval: draftSettings.billing_interval,
       override_unit_amount: agg.pricing_mode === "override" ? agg.unit_amount : undefined,
-      coupon_id: agg.coupon_id || undefined,
     })),
     esercizio_detail: productLines.filter(l => l.product_id && l.price_id).map(l => ({
       esercizio_id: l.esercizio_id, product_id: l.product_id, price_id: l.price_id,
       quantity: l.quantity || 1, pricing_mode: l.pricing_mode,
       unit_amount: getLineUnitAmount(l),
-      override_unit_amount: l.pricing_mode === "override" ? getLineUnitAmount(l) : undefined,
-      coupon_id: l.coupon_id || undefined,
     })),
   });
 
@@ -1152,16 +1453,37 @@ function CreateSubscriptionPage() {
     setSaving(true); setStatusMsg(null); setShowStripeConfirm(false);
     try {
       const payload = buildStripePayload();
-      const resp = await fetch(N8N_BASE + "/sb-wf11-create-subscription", {
+      const resp = await fetch(N8N_BASE + "/sb-wf12-stripe-ops", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const data = await resp.json();
-      if (data.success !== false && !data.error) {
-        setStatusMsg({ type: "success", text: `Subscription creata in Stripe: ${data.subscription_id || "OK"}` });
-        setSelectedEsercizi([]); setProductLines([]); setStep(1); setSelectedCustomer(null);
+      if (data.success) {
+        // Save esercizio mappings to Supabase
+        const subId = data.subscription_id;
+        const subItems = data.items || [];
+        for (const es of selectedEsercizi) {
+          const esLines = linesForEs(es.esercizio_id);
+          for (const line of esLines) {
+            if (!line.product_id || !line.price_id) continue;
+            const matchingItem = subItems.find(si => si.product_id === line.product_id) || subItems[0];
+            try {
+              await sbPost("esercizio_subscription", {
+                esercizio_id: es.esercizio_id, stripe_subscription_id: subId,
+                stripe_item_id: matchingItem?.id || null,
+                product_id: line.product_id, price_id: line.price_id,
+                utenze_count: line.quantity || 1, mapping_source: "dashboard_create",
+              });
+              await sbPatch("esercizi", `esercizio_id=eq.${es.esercizio_id}`, {
+                stripe_subscription_id: subId, status: "attivo_regolare", updated_at: new Date().toISOString(),
+              });
+            } catch (mapErr) { console.warn("Mapping warn:", mapErr.message); }
+          }
+        }
+        setStatusMsg({ type: "success", text: `Subscription creata: ${subId} — Status: ${data.status}. ${selectedEsercizi.length} esercizi mappati.` });
+        setSelectedEsercizi([]); setProductLines([]); setStep(1); setSelectedCustomer(null); setStripePreview(null);
         reloadEsercizi();
       } else {
-        setStatusMsg({ type: "error", text: "Errore Stripe: " + (data.message || data.error || JSON.stringify(data)) });
+        setStatusMsg({ type: "error", text: "Errore Stripe: " + (data.error || JSON.stringify(data)) });
       }
     } catch (err) { setStatusMsg({ type: "error", text: "Errore: " + err.message }); }
     finally { setSaving(false); }
@@ -1203,7 +1525,7 @@ function CreateSubscriptionPage() {
   const ProductLineRow = ({ line, canRemove }) => {
     const selectedProduct = getProduct(line.product_id);
     const selectedPrice = getPrice(line.price_id);
-    const catalogPrice = selectedPrice ? eur(selectedPrice.unit_amount / 100) : null;
+    const isOverride = line.pricing_mode === "override";
     const effectiveAmount = getLineUnitAmount(line);
 
     return (<div className="flex items-start gap-2 py-2 border-b border-gray-100 last:border-0">
@@ -1224,35 +1546,44 @@ function CreateSubscriptionPage() {
             </option>
           ))}
         </select>
-        {selectedPrice && <p className="text-[10px] text-gray-400 mt-0.5 px-1">Prezzo catalogo: <strong>{eur(selectedPrice.unit_amount / 100)}</strong> / {selectedPrice.billing_interval === "year" ? "anno" : "mese"}</p>}
       </div>
       {/* Qty */}
       <div className="w-16">
         <input type="number" min="1" value={line.quantity} onChange={e => updateLine(line.id, "quantity", parseInt(e.target.value) || 1)} className={inputCls + " text-xs text-center"} />
       </div>
-      {/* Pricing mode */}
+      {/* Pricing mode + effective price display */}
       <div className="w-44">
         <select value={line.pricing_mode} onChange={e => updateLine(line.id, "pricing_mode", e.target.value)} className={selectCls + " text-xs"}>
           <option value="standard">Prezzo Catalogo</option>
           <option value="override">Prezzo Personalizzato</option>
         </select>
       </div>
-      {/* Override amount */}
-      <div className="w-28">
-        {line.pricing_mode === "override" ? (
+      {/* Price applied - CLEAR VISUAL: only show the price that WILL be used */}
+      <div className="w-36">
+        {!isOverride && selectedPrice ? (
+          <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg">
+            <p className="text-xs font-bold text-emerald-800">{eur(selectedPrice.unit_amount / 100)}</p>
+            <p className="text-[9px] text-emerald-600">Catalogo ✓</p>
+          </div>
+        ) : isOverride ? (
           <div>
-            <input type="number" step="0.01" value={line.override_amount} onChange={e => updateLine(line.id, "override_amount", e.target.value)} className={inputCls + " text-xs"} placeholder="€ custom" />
-            {catalogPrice && line.override_amount && <p className="text-[10px] text-amber-600 mt-0.5 px-1">Catalogo: {catalogPrice}</p>}
+            <input type="number" step="0.01" value={line.override_amount} onChange={e => updateLine(line.id, "override_amount", e.target.value)} className={inputCls + " text-xs !border-amber-300 !bg-amber-50"} placeholder="€ custom" />
+            {line.override_amount && (
+              <div className="p-1.5 bg-amber-50 border border-amber-200 rounded-lg mt-1">
+                <p className="text-[9px] text-amber-700 font-bold">PREZZO CUSTOM: {eur(parseFloat(line.override_amount) || 0)}</p>
+                {selectedPrice && <p className="text-[9px] text-gray-400 line-through">Catalogo: {eur(selectedPrice.unit_amount / 100)}</p>}
+              </div>
+            )}
           </div>
         ) : <div className="py-2 text-xs text-gray-400 text-center">—</div>}
       </div>
       {/* Coupon */}
-      <div className="w-28">
+      <div className="w-24">
         <input type="text" value={line.coupon_id} onChange={e => updateLine(line.id, "coupon_id", e.target.value)} className={inputCls + " text-xs"} placeholder="Coupon" />
       </div>
       {/* Subtotal */}
       <div className="w-24 text-right py-2">
-        <span className="text-xs font-bold text-gray-900">{line.product_id && line.price_id ? eur(effectiveAmount * (line.quantity || 1) / 100) : "—"}</span>
+        <span className={`text-xs font-bold ${isOverride ? "text-amber-700" : "text-gray-900"}`}>{line.product_id && line.price_id ? eur(effectiveAmount * (line.quantity || 1) / 100) : "—"}</span>
       </div>
       {/* Remove */}
       <div className="w-8 py-2">
@@ -1400,11 +1731,11 @@ function CreateSubscriptionPage() {
         {/* Column headers */}
         <div className="flex items-center gap-2 py-2 px-1 border-b-2 border-gray-200 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
           <div className="flex-1">Prodotto</div>
-          <div className="w-52">Prezzo</div>
+          <div className="w-52">Prezzo Catalogo</div>
           <div className="w-16 text-center">Qtà</div>
           <div className="w-44">Tipo Prezzo</div>
-          <div className="w-28">Custom €</div>
-          <div className="w-28">Coupon</div>
+          <div className="w-36">Prezzo Applicato</div>
+          <div className="w-24">Coupon</div>
           <div className="w-24 text-right">Subtotale</div>
           <div className="w-8"></div>
         </div>
@@ -1471,12 +1802,65 @@ function CreateSubscriptionPage() {
           <div><span className="text-gray-500 block text-xs">Esercizi</span><span className="font-bold">{selectedEsercizi.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Righe prodotto</span><span className="font-bold">{productLines.length}</span></div>
           <div><span className="text-gray-500 block text-xs">Items Stripe (aggregati)</span><span className="font-bold">{aggregatedItems.length}</span></div>
-          <div><span className="text-gray-500 block text-xs">Totale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {draftSettings.billing_interval === "year" ? "anno" : "mese"}</span></div>
+          <div><span className="text-gray-500 block text-xs">Totale locale</span><span className="font-bold text-xl text-indigo-700">{eur(totalAmount / 100)}</span><span className="text-xs text-gray-400 ml-1">/ {draftSettings.billing_interval === "year" ? "anno" : "mese"}</span></div>
+        </div>
+
+        {/* STRIPE INVOICE PREVIEW */}
+        <div className="mb-5 p-4 bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-200 rounded-xl">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-xs font-bold text-indigo-800 flex items-center gap-1.5"><FileCheck size={14} /> Preview Fattura Stripe</h4>
+            <button onClick={fetchStripePreview} disabled={previewLoading || !isValid} className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-40 flex items-center gap-1.5">
+              {previewLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {previewLoading ? "Caricamento..." : stripePreview ? "Aggiorna Preview" : "Carica Preview da Stripe"}
+            </button>
+          </div>
+          {!stripePreview && !previewLoading && <p className="text-[11px] text-indigo-600/70">Clicca il pulsante per generare un'anteprima reale della fattura da Stripe, con importi definitivi, tasse e data primo pagamento.</p>}
+          {stripePreview && (<div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="bg-white rounded-lg p-3 border border-indigo-100">
+                <span className="text-[10px] text-gray-500 block">Subtotale</span>
+                <span className="font-bold text-sm">{eur((stripePreview.subtotal || 0) / 100)}</span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-indigo-100">
+                <span className="text-[10px] text-gray-500 block">Tasse</span>
+                <span className="font-bold text-sm">{eur((stripePreview.tax || 0) / 100)}</span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-emerald-200">
+                <span className="text-[10px] text-gray-500 block">Totale</span>
+                <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.total || 0) / 100)}</span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-emerald-200">
+                <span className="text-[10px] text-gray-500 block">Da incassare</span>
+                <span className="font-bold text-sm text-emerald-700">{eur((stripePreview.amount_due || 0) / 100)}</span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-amber-200">
+                <span className="text-[10px] text-gray-500 block">Prima fattura</span>
+                <span className="font-bold text-sm text-amber-700">{stripePreview.next_payment_attempt ? new Date(stripePreview.next_payment_attempt * 1000).toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) : "Immediato"}</span>
+              </div>
+            </div>
+            {/* Stripe line items */}
+            {stripePreview.lines && stripePreview.lines.length > 0 && (<div>
+              <h5 className="text-[10px] font-bold text-indigo-700 mb-1.5 mt-2">Righe fattura Stripe</h5>
+              <table className="w-full text-[11px]"><thead><tr className="border-b border-indigo-100 bg-indigo-50/50">
+                <th className="text-left py-1.5 px-2">Descrizione</th>
+                <th className="text-right py-1.5 px-2">Qtà</th>
+                <th className="text-right py-1.5 px-2">Importo</th>
+                <th className="text-left py-1.5 px-2">Periodo</th>
+              </tr></thead><tbody>{stripePreview.lines.map((line, i) => (
+                <tr key={i} className="border-b border-indigo-50">
+                  <td className="py-1.5 px-2">{line.description || "—"}</td>
+                  <td className="py-1.5 px-2 text-right">{line.quantity || 1}</td>
+                  <td className="py-1.5 px-2 text-right font-bold">{eur((line.amount || 0) / 100)}</td>
+                  <td className="py-1.5 px-2 text-[10px] text-gray-400">{line.period_start ? new Date(line.period_start * 1000).toLocaleDateString("it-IT") : ""}{line.period_end ? ` → ${new Date(line.period_end * 1000).toLocaleDateString("it-IT")}` : ""}</td>
+                </tr>
+              ))}</tbody></table>
+            </div>)}
+            {(stripePreview.total || 0) !== totalAmount && (<p className="text-[10px] text-amber-700 mt-2 flex items-center gap-1"><AlertTriangle size={10} /> Il totale Stripe ({eur((stripePreview.total || 0) / 100)}) differisce dal calcolo locale ({eur(totalAmount / 100)}). Stripe applica arrotondamenti e tasse.</p>)}
+          </div>)}
         </div>
 
         {/* AGGREGATION TABLE */}
-        <h4 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5"><Package size={14} /> Items Stripe (dopo aggregazione)</h4>
-        <p className="text-[10px] text-gray-400 mb-3">Righe con stesso prodotto, prezzo, tipo pricing e coupon vengono raggruppate in un unico item Stripe con quantità cumulata</p>
+        <h4 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5"><Package size={14} /> Items Stripe (dopo aggregazione locale)</h4>
+        <p className="text-[10px] text-gray-400 mb-3">Righe con stesso prodotto, prezzo e tipo pricing vengono raggruppate in un unico item Stripe con quantità cumulata</p>
         <table className="w-full text-xs mb-5"><thead><tr className="border-b border-gray-200 bg-gray-50">
           <th className="text-left py-2 px-3">Prodotto</th>
           <th className="text-right py-2 px-3">Prezzo Unitario</th>
